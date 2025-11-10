@@ -28,17 +28,24 @@ jobs:
       - name: Generate 2D drawing exports
         env:
           QT_QPA_PLATFORM: offscreen
-          FREECADPATH: ${{ env.FREECAD_APPIMAGE_DIR }}/squashfs-root/usr/lib/freecad/lib
         run: |
           set -euo pipefail
           mkdir -p "${DRAWING_OUTPUT_DIR}"
+          export FREECADPATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib/freecad/lib"
+          export LD_LIBRARY_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
+          export FREECAD_USER_HOME="${GITHUB_WORKSPACE}/wheelbarrow_build/freecad_user"
+          export XDG_RUNTIME_DIR="${GITHUB_WORKSPACE}/wheelbarrow_build/runtime"
+          mkdir -p "${FREECAD_USER_HOME}"
+          mkdir -p "${XDG_RUNTIME_DIR}"
+          chmod 700 "${XDG_RUNTIME_DIR}"
           "${FREECADCMD_PATH}" \
-            generate_wheelbarrow_drawings.py \
+            "${GITHUB_WORKSPACE}/generate_wheelbarrow_drawings.py" \
             -- \
             --out "${DRAWING_OUTPUT_DIR}" \
             --paper Tabloid \
             --scale 1.0 \
-            --no-titleblock
+            --no-titleblock \
+            --pdf-backend auto
 
       - name: Inspect generated drawings
         run: |
@@ -46,6 +53,7 @@ jobs:
           ls -R "${DRAWING_OUTPUT_DIR}"
           test -f "${DRAWING_OUTPUT_DIR}/all_parts.dxf"
           test -f "${DRAWING_OUTPUT_DIR}/all_parts.svg"
+          test -f "${DRAWING_OUTPUT_DIR}/all_parts.pdf"
 
       - name: Bundle drawing outputs
         run: |

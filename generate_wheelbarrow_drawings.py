@@ -5,8 +5,10 @@
 This module reproduces the headless export pipeline that previously lived only
 inside the `MiniWheelbarrow.FCMacro` macro. Running it with ``FreeCADCmd``
 creates 2D profiles for every part (rails, tray panels, spreaders, legs, axle
-block, and wheel) and exports them as DXF/SVG files. When the TechDraw
-workbench is available a consolidated PDF sheet is produced as well.
+block, and wheel) and exports them as DXF/SVG files. A consolidated PDF sheet is
+produced via TechDraw when the workbench is available; otherwise a Qt-based
+fallback renders a simplified outline-only PDF so CI jobs still publish a PDF
+artifact.
 
 The script defaults to generating the original 1:1 drawings, but all linear
 dimensions can be scaled uniformly via ``--scale``. Scaling affects every
@@ -20,7 +22,8 @@ import argparse
 import math
 import os
 import sys
-from typing import Dict, Iterable, List, Sequence, Tuple
+import tempfile
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
 import FreeCAD as App
@@ -100,6 +103,15 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
+def _set_view_properties(obj: App.DocumentObject, **props: float) -> None:
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        return
+    for key, value in props.items():
+        if hasattr(view, key):
+            setattr(view, key, value)
+
+
 def recompute(doc: App.Document) -> None:
     try:
         doc.recompute()
@@ -108,8 +120,8 @@ def recompute(doc: App.Document) -> None:
 
 
 def add_text(doc: App.Document, text: str, pos: Vector2D, *, size: float = 4.0) -> App.DocumentObject:
-    annotation = Draft.make_text([text], point=App.Vector(pos[0], pos[1], 0))
-    annotation.ViewObject.FontSize = size
+    annotation = Draft.make_text([text], App.Vector(pos[0], pos[1], 0))
+    _set_view_properties(annotation, FontSize=size)
     return annotation
 
 
@@ -118,10 +130,13 @@ def add_linear_dimension(doc: App.Document, p1: Vector2D, p2: Vector2D, dim_pos:
     v2 = App.Vector(p2[0], p2[1], 0)
     vdim = App.Vector(dim_pos[0], dim_pos[1], 0)
     dim = Draft.make_dimension(v1, v2, vdim)
-    dim.ViewObject.FontSize = 3.0
-    dim.ViewObject.ArrowSize = 2.0
-    dim.ViewObject.ExtLines = 1
-    dim.ViewObject.ShowUnit = False
+    _set_view_properties(
+        dim,
+        FontSize=3.0,
+        ArrowSize=2.0,
+        ExtLines=1,
+        ShowUnit=False,
+    )
     return dim
 
 
@@ -646,16 +661,173 @@ def layout_parts(doc: App.Document, params: Dict[str, float], *, scale: float = 
 # Export helpers
 # -----------------------------
 def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> None:
+    """Export the provided Draft objects to DXF and SVG files.
+
+    ``importDXF``/``importSVG`` offer better fidelity for 2D outputs in modern
+    FreeCAD packages, but ``Import.export`` remains the universal fallback.
+    Each exporter must leave a real file behind; otherwise the fallback is
+    invoked automatically and the failure is reported.
+    """
+
+    def _remove_existing(path: str) -> None:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as exc:  # pragma: no cover - depends on FS state
+                raise RuntimeError(f"Could not overwrite existing file {path}: {exc}")
+
+    def _attempt_named_export(
+        module_name: str,
+        objs: Sequence[App.DocumentObject],
+        path: str,
+        *,
+        label: str,
+    ) -> Tuple[bool, str | None]:
+        try:
+            module = __import__(module_name)
+        except Exception as exc:  # pragma: no cover - module availability varies
+            return False, f"{module_name} unavailable: {exc}"
+
+        try:
+            module.export(objs, path)  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - env specific
+            return False, f"{module_name}.export failed for {label}: {exc}"
+
+        if not os.path.exists(path):
+            return False, f"{module_name}.export reported success but {path} missing"
+        return True, None
+
+    def _attempt_draft_export(
+        objs: Sequence[App.DocumentObject], path: str, *, label: str
+    ) -> Tuple[bool, str | None]:
+        try:
+            Draft.export(objs, path)
+        except Exception as exc:  # pragma: no cover - env specific
+            return False, f"Draft.export failed for {label}: {exc}"
+        if not os.path.exists(path):
+            return False, f"Draft.export reported success but {path} missing"
+        return True, None
+
+    def _attempt_import_export(
+        objs: Sequence[App.DocumentObject], path: str, *, label: str
+    ) -> Tuple[bool, str | None]:
+        try:
+            Import.export(objs, path)
+        except Exception as exc:  # pragma: no cover - env specific
+            return False, f"Import.export failed for {label}: {exc}"
+        if not os.path.exists(path):
+            return False, f"Import.export reported success but {path} missing"
+        return True, None
+
+    objs = list(objects)
+    if not objs:
+        raise ValueError(f"No objects provided for export to {out_path_base}")
+
     dxf_path = f"{out_path_base}.dxf"
     svg_path = f"{out_path_base}.svg"
-    try:
-        Import.export(list(objects), dxf_path)
-    except Exception as exc:  # pragma: no cover - depends on FreeCAD environment
-        print(f"[WARN] DXF export failed for {out_path_base}: {exc}")
-    try:
-        Import.export(list(objects), svg_path)
-    except Exception as exc:  # pragma: no cover - depends on FreeCAD environment
-        print(f"[WARN] SVG export failed for {out_path_base}: {exc}")
+
+    for path in (dxf_path, svg_path):
+        _remove_existing(path)
+
+    errors: List[str] = []
+
+    def _run_export_chain(*attempts: Tuple[str, Callable[[], Tuple[bool, str | None]]]) -> None:
+        messages: List[str] = []
+        last_index = len(attempts) - 1
+        for idx, (attempt_name, runner) in enumerate(attempts):
+            success, warn_msg = runner()
+            if success:
+                return
+            if idx < last_index:
+                if warn_msg:
+                    print(f"[WARN] {warn_msg}")
+            else:
+                messages.append(
+                    warn_msg if warn_msg else f"{attempt_name} export failed without details"
+                )
+        if messages:
+            errors.extend(messages)
+
+    def _make_runner(func, *args, **kwargs) -> Callable[[], Tuple[bool, str | None]]:
+        return lambda: func(*args, **kwargs)
+
+    _run_export_chain(
+        (
+            "importDXF",
+            _make_runner(
+                _attempt_named_export,
+                "importDXF",
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
+        (
+            "Draft",
+            _make_runner(
+                _attempt_draft_export,
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
+        (
+            "Import",
+            _make_runner(
+                _attempt_import_export,
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
+    )
+
+    _run_export_chain(
+        (
+            "importSVG",
+            _make_runner(
+                _attempt_named_export,
+                "importSVG",
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+        (
+            "Draft",
+            _make_runner(
+                _attempt_draft_export,
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+        (
+            "Import",
+            _make_runner(
+                _attempt_import_export,
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+    )
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
+
+
+PDF_BACKENDS = ("techdraw", "qt", "auto")
+
+TECHDRAW_TEMPLATE_MAP = {
+    "A4": {"titleblock": "A4_Landscape_TD.svg", "blank": "A4_Landscape_blank.svg"},
+    "A3": {"titleblock": "A3_Landscape_TD.svg", "blank": "A3_Landscape_blank.svg"},
+    "Tabloid": {"titleblock": "ANSIB_Landscape.svg", "blank": "ANSIB_Landscape_blank.svg"},
+    "Letter": {"titleblock": "ANSIA_Landscape.svg", "blank": "ANSIA_Landscape_blank.svg"},
+    "Legal": {"titleblock": "ANSIB_Portrait.svg", "blank": None},
+}
+
+TECHDRAW_QT_APP: object | None = None
 
 
 def make_pdf_page_from_objects(
@@ -666,33 +838,266 @@ def make_pdf_page_from_objects(
     title: str = "Sheet",
     out_pdf_path: str | None = None,
     with_titleblock: bool = True,
+    scale_hint: float = 1.0,
+    pdf_backend: str = "techdraw",
 ) -> None:
-    if not TECHDRAW_AVAILABLE:
-        print("[INFO] TechDraw not available: PDF not generated.")
+    def _blank_template_svg(width_mm: float, height_mm: float) -> str:
+        return (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<svg width=\"{width}mm\" height=\"{height}mm\" "
+            "viewBox=\"0 0 {width} {height}\" version=\"1.1\" "
+            "xmlns=\"http://www.w3.org/2000/svg\" "
+            "xmlns:cc=\"http://creativecommons.org/ns#\" "
+            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n"
+            " <metadata>\n"
+            "  <rdf:RDF>\n"
+            "   <cc:Work rdf:about=\"\">\n"
+            "    <dc:format>image/svg+xml</dc:format>\n"
+            "    <dc:type rdf:resource=\"http://purl.org/dc/dcmitype/StillImage\"/>\n"
+            "   </cc:Work>\n"
+            "  </rdf:RDF>\n"
+            " </metadata>\n"
+            "</svg>\n"
+        ).format(width=f"{width_mm:.3f}", height=f"{height_mm:.3f}")
+
+    def _sanitize_for_filename(*parts: str) -> str:
+        cleaned: List[str] = []
+        for part in parts:
+            token = part.lower().replace(" ", "_").replace("/", "-")
+            cleaned.append(token)
+        return "_".join(cleaned)
+
+    def _get_standard_template_path(template_name: str) -> str:
+        resource_dir = App.getResourceDir()
+        candidate = os.path.join(resource_dir, "Mod", "TechDraw", "Templates", template_name)
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(
+                f"TechDraw template '{template_name}' not found under {resource_dir}"
+            )
+        return candidate
+
+    def _resolve_template_path(width_mm: float, height_mm: float) -> str:
+        mapping = TECHDRAW_TEMPLATE_MAP.get(paper) or TECHDRAW_TEMPLATE_MAP[DEFAULT_PAPER]
+        key = "titleblock" if with_titleblock else "blank"
+        template_name = mapping.get(key)
+        if template_name:
+            return _get_standard_template_path(template_name)
+
+        cache_root = os.path.join(
+            os.path.dirname(out_pdf_path) if out_pdf_path else tempfile.gettempdir(),
+            "_techdraw_templates",
+        )
+        ensure_dir(cache_root)
+        file_name = _sanitize_for_filename(
+            paper,
+            "blank",
+            f"{width_mm:.1f}".replace(".", "_"),
+            f"{height_mm:.1f}".replace(".", "_"),
+        )
+        template_path = os.path.join(cache_root, f"{file_name}.svg")
+        if not os.path.exists(template_path):
+            with open(template_path, "w", encoding="utf-8") as handle:
+                handle.write(_blank_template_svg(width_mm, height_mm))
+        return template_path
+
+    def _ensure_techdraw_gui() -> Callable[[App.DocumentObject, str], None]:
+        global TECHDRAW_QT_APP
+
+        qt_widgets = None
+        try:
+            from PySide2 import QtWidgets  # type: ignore[import]
+            qt_widgets = QtWidgets
+        except Exception:
+            try:
+                from PySide6 import QtWidgets  # type: ignore[import,no-redef]
+                qt_widgets = QtWidgets
+            except Exception as exc:  # pragma: no cover - depends on runtime env
+                raise RuntimeError(f"Qt widgets unavailable for TechDraw export: {exc}")
+
+        if TECHDRAW_QT_APP is None:
+            TECHDRAW_QT_APP = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+            TECHDRAW_QT_APP.setQuitOnLastWindowClosed(False)
+
+        import FreeCADGui
+
+        try:
+            FreeCADGui.setupWithoutGUI()
+        except Exception:
+            # setupWithoutGUI raises if already initialised; ignore to allow reuse.
+            pass
+
+        import TechDrawGui  # type: ignore[import]
+
+        if not hasattr(TechDrawGui, "exportPageAsPdf"):
+            raise RuntimeError("TechDrawGui lacks exportPageAsPdf; cannot produce PDF.")
+
+        return TechDrawGui.exportPageAsPdf
+
+    def _techdraw_pdf() -> None:
+        page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
+        w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
+        template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
+        template.Template = _resolve_template_path(w, h)
+        page.Template = template
+
+        for i, obj in enumerate(objects):
+            view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
+            view.Source = [obj]
+            page.addView(view)
+
+        recompute(doc)
+
+        if out_pdf_path:
+            abs_pdf_path = os.path.abspath(out_pdf_path)
+            exporter = _ensure_techdraw_gui()
+            exporter(page, abs_pdf_path)
+            if not os.path.exists(abs_pdf_path):
+                raise RuntimeError(
+                    f"TechDraw export did not produce a PDF at {abs_pdf_path}."
+                )
+
+    def _qt_pdf_fallback() -> None:
+        if out_pdf_path is None:
+            print("[INFO] TechDraw unavailable and no PDF path supplied; skipping PDF export.")
+            return
+
+        try:
+            from PySide2 import QtCore, QtGui, QtPrintSupport
+        except Exception:  # pragma: no cover - depends on FreeCAD build
+            try:
+                from PySide6 import QtCore, QtGui, QtPrintSupport  # type: ignore[no-redef]
+            except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                raise RuntimeError(f"Qt bindings unavailable for PDF fallback: {exc}")
+
+        shapes = [getattr(obj, "Shape", None) for obj in objects]
+        shapes = [shape for shape in shapes if shape is not None and not shape.isNull()]
+        if not shapes:
+            raise RuntimeError("No shapes available for PDF fallback export.")
+
+        bbox = shapes[0].BoundBox
+        for shape in shapes[1:]:
+            bbox.add(shape.BoundBox)
+
+        page_w_mm, page_h_mm = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
+        margin_top_mm = 18.0 if with_titleblock else 10.0
+        margin_side_mm = 10.0
+        margin_bottom_mm = 12.0
+
+        def mm_to_pt(mm: float) -> float:
+            return mm * 72.0 / 25.4
+
+        page_w_pt = mm_to_pt(page_w_mm)
+        page_h_pt = mm_to_pt(page_h_mm)
+        usable_w_pt = page_w_pt - 2.0 * mm_to_pt(margin_side_mm)
+        usable_h_pt = page_h_pt - (mm_to_pt(margin_top_mm) + mm_to_pt(margin_bottom_mm))
+        width_mm = max(bbox.XLength, 1e-3)
+        height_mm = max(bbox.YLength, 1e-3)
+        scale_pt_per_mm = min(usable_w_pt / width_mm, usable_h_pt / height_mm)
+        # Respect the requested scale hint by adjusting the drawing scale factor.
+        if scale_hint > 0:
+            scale_pt_per_mm /= scale_hint
+
+        content_w_pt = width_mm * scale_pt_per_mm
+        content_h_pt = height_mm * scale_pt_per_mm
+        offset_x_pt = mm_to_pt(margin_side_mm) + max(0.0, (usable_w_pt - content_w_pt) / 2.0)
+        offset_y_pt = (
+            mm_to_pt(margin_top_mm)
+            + max(0.0, (usable_h_pt - content_h_pt) / 2.0)
+            + bbox.YMax * scale_pt_per_mm
+        )
+        translate_x = offset_x_pt - bbox.XMin * scale_pt_per_mm
+        translate_y = offset_y_pt
+
+        printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.HighResolution)
+        printer.setOutputFormat(QtPrintSupport.QPrinter.PdfFormat)
+        printer.setOutputFileName(out_pdf_path)
+        printer.setResolution(300)
+        printer.setPageMargins(
+            margin_side_mm,
+            margin_top_mm,
+            margin_side_mm,
+            margin_bottom_mm,
+            QtPrintSupport.QPrinter.Millimeter,
+        )
+        printer.setPageSizeMM(QtCore.QSizeF(page_w_mm, page_h_mm))
+
+        painter = QtGui.QPainter(printer)
+        if not painter.isActive():  # pragma: no cover - depends on runtime env
+            raise RuntimeError(f"Could not activate PDF painter for {out_pdf_path}")
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        pen = QtGui.QPen(QtCore.Qt.black)
+        pen.setWidthF(0.2)
+        painter.setPen(pen)
+
+        transform = QtGui.QTransform()
+        transform.translate(translate_x, translate_y)
+        transform.scale(scale_pt_per_mm, -scale_pt_per_mm)
+        painter.setTransform(transform)
+
+        try:
+            for shape in shapes:
+                for edge in shape.Edges:
+                    pts = edge.discretize(Deflection=0.25)
+                    if len(pts) < 2:
+                        continue
+                    path = QtGui.QPainterPath(QtCore.QPointF(pts[0].x, pts[0].y))
+                    for pt in pts[1:]:
+                        path.lineTo(pt.x, pt.y)
+                    painter.drawPath(path)
+        finally:
+            painter.resetTransform()
+
+            if with_titleblock:
+                painter.setPen(QtGui.QPen(QtCore.Qt.black))
+                font = QtGui.QFont()
+                font.setPointSizeF(10.0)
+                painter.setFont(font)
+                title_rect = QtCore.QRectF(
+                    mm_to_pt(margin_side_mm),
+                    mm_to_pt(5.0),
+                    page_w_pt - 2.0 * mm_to_pt(margin_side_mm),
+                    mm_to_pt(margin_top_mm - 6.0),
+                )
+                painter.drawText(
+                    title_rect,
+                    QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                    f"{title} (scale {scale_hint:.2f} : 1)",
+                )
+
+            painter.end()
+
+        print(f"[INFO] Qt PDF fallback wrote {out_pdf_path}")
+
+    backend = pdf_backend.lower()
+    if backend not in PDF_BACKENDS:
+        raise ValueError(f"Unsupported PDF backend '{pdf_backend}'")
+
+    if backend == "techdraw":
+        if not TECHDRAW_AVAILABLE:
+            raise RuntimeError(
+                "TechDraw backend requested but TechDraw module is unavailable."
+            )
+        _techdraw_pdf()
         return
 
-    page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
-    if with_titleblock:
-        template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
-        template.Template = TechDraw.getStandardTemplate("A4_LandscapeTD.svg")
-        page.Template = template
-    else:
-        w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
-        page.Width = w
-        page.Height = h
+    if backend == "qt":
+        _qt_pdf_fallback()
+        return
 
-    for i, obj in enumerate(objects):
-        view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
-        view.Source = [obj]
-        page.addView(view)
-
-    recompute(doc)
-
-    if out_pdf_path:
+    # backend == "auto"
+    if TECHDRAW_AVAILABLE:
         try:
-            page.exportPageAsPdf(out_pdf_path)
-        except Exception as exc:  # pragma: no cover - depends on TechDraw
-            print(f"[WARN] PDF export failed ({out_pdf_path}): {exc}")
+            _techdraw_pdf()
+            return
+        except Exception as exc:
+            print(f"[WARN] TechDraw export failed ({exc}); falling back to Qt.")
+
+    try:
+        _qt_pdf_fallback()
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        print(f"[WARN] TechDraw unavailable and PDF fallback failed: {exc}")
 
 
 # -----------------------------
@@ -731,6 +1136,16 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         dest="no_titleblock",
         action="store_true",
         help="Generate the PDF without a title block (exact paper size)",
+    )
+    parser.add_argument(
+        "--pdf-backend",
+        dest="pdf_backend",
+        default="techdraw",
+        choices=PDF_BACKENDS,
+        help=(
+            "PDF export backend to use: 'techdraw' (default, requires TechDraw), "
+            "'qt' (PySide fallback), or 'auto' (TechDraw when available, otherwise Qt)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -775,14 +1190,25 @@ def main(argv: List[str] | None = None) -> int:
         title=args.title,
         out_pdf_path=pdf_path,
         with_titleblock=(not args.no_titleblock),
+        scale_hint=args.scale,
+        pdf_backend=args.pdf_backend,
     )
 
     doc.saveAs(os.path.join(args.outdir, "freecad_source.FCStd"))
     print(f"[OK] Exports in: {args.outdir}")
-    if TECHDRAW_AVAILABLE:
-        print(f"[OK] PDF: {pdf_path}")
+    if os.path.exists(pdf_path):
+        print(f"[OK] PDF ({args.pdf_backend} backend): {pdf_path}")
     else:
-        print("[INFO] TechDraw not available; PDF skipped.")
+        if args.pdf_backend == "techdraw":
+            print("[WARN] TechDraw was available but PDF export did not create a file.")
+        elif args.pdf_backend == "qt":
+            print("[WARN] Qt PDF backend requested but no file was generated.")
+        elif TECHDRAW_AVAILABLE:
+            print(
+                "[WARN] TechDraw was available but auto PDF export did not create a file."
+            )
+        else:
+            print("[INFO] TechDraw unavailable; PDF fallback skipped or failed.")
     return 0
 
 

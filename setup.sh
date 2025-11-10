@@ -9,11 +9,12 @@ FREECAD_APPIMAGE_DIR="${FREECAD_CACHE_DIR}/appimage-${FREECAD_APPIMAGE_VERSION}"
 FREECAD_APPIMAGE_PATH="${FREECAD_APPIMAGE_DIR}/FreeCAD_${FREECAD_APPIMAGE_VERSION}.AppImage"
 FREECAD_APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_APPIMAGE_VERSION}/FreeCAD_${FREECAD_APPIMAGE_VERSION}-conda-Linux-x86_64-py311.AppImage"
 APPIMAGE_RUNTIME_DEPS=(
-    libgl1-mesa-glx
-    libglu1-mesa
-    libxrender1
-    libxkbcommon-x11-0
+    fonts-dejavu-core
     libegl1
+    libgl1
+    libglu1-mesa
+    libxkbcommon-x11-0
+    libxrender1
     libxcb-icccm4
     libxcb-image0
     libxcb-keysyms1
@@ -23,6 +24,10 @@ APPIMAGE_RUNTIME_DEPS=(
     libxcb-xinerama0
     libxcb-xkb1
     xz-utils
+)
+
+APPIMAGE_OPTIONAL_DEPS=(
+    libgl1-mesa-glx
 )
 
 info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
@@ -68,6 +73,11 @@ install_appimage_runtime_deps() {
         need_cmd sudo
         sudo apt-get update
         sudo apt-get install -y "${APPIMAGE_RUNTIME_DEPS[@]}"
+        for pkg in "${APPIMAGE_OPTIONAL_DEPS[@]}"; do
+            if ! sudo apt-get install -y "$pkg"; then
+                warn "Optional AppImage dependency '$pkg' could not be installed."
+            fi
+        done
     else
         warn "AppImage runtime dependency installation is only automated for apt-get; please install equivalents manually."
     fi
