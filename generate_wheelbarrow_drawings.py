@@ -25,7 +25,6 @@ import os
 import sys
 import tempfile
 import time
-import contextlib
 import re
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -882,9 +881,6 @@ TECHDRAW_TEMPLATE_MAP = {
     "Legal": {"titleblock": "ANSIB_Portrait.svg", "blank": None},
 }
 
-TECHDRAW_QT_APP: object | None = None
-
-
 def make_pdf_page_from_objects(
     doc: App.Document,
     objects: Iterable[App.DocumentObject],
@@ -957,41 +953,6 @@ def make_pdf_page_from_objects(
             with open(template_path, "w", encoding="utf-8") as handle:
                 handle.write(_blank_template_svg(width_mm, height_mm))
         return template_path
-
-    def _ensure_techdraw_gui() -> Callable[[App.DocumentObject, str], None]:
-        global TECHDRAW_QT_APP
-
-        configure_fontconfig()
-
-        qt_widgets = None
-        try:
-            from PySide2 import QtWidgets  # type: ignore[import]
-            qt_widgets = QtWidgets
-        except Exception:
-            try:
-                from PySide6 import QtWidgets  # type: ignore[import,no-redef]
-                qt_widgets = QtWidgets
-            except Exception as exc:  # pragma: no cover - depends on runtime env
-                raise RuntimeError(f"Qt widgets unavailable for TechDraw export: {exc}")
-
-        if TECHDRAW_QT_APP is None:
-            TECHDRAW_QT_APP = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
-            TECHDRAW_QT_APP.setQuitOnLastWindowClosed(False)
-
-        import FreeCADGui
-
-        try:
-            FreeCADGui.setupWithoutGUI()
-        except Exception:
-            # setupWithoutGUI raises if already initialised; ignore to allow reuse.
-            pass
-
-        import TechDrawGui  # type: ignore[import]
-
-        if not hasattr(TechDrawGui, "exportPageAsPdf"):
-            raise RuntimeError("TechDrawGui lacks exportPageAsPdf; cannot produce PDF.")
-
-        return TechDrawGui.exportPageAsPdf
 
     def _make_doc_name(prefix: str) -> str:
         token = re.sub(r"[^0-9A-Za-z_]+", "_", prefix).strip("_") or "TechDraw"
@@ -1114,62 +1075,6 @@ def make_pdf_page_from_objects(
             if not created_views:
                 raise RuntimeError("No TechDraw views were created for PDF export.")
 
-            recompute(doc)
-
-            if out_pdf_path:
-                abs_pdf_path = os.path.abspath(out_pdf_path)
-                if os.path.exists(abs_pdf_path):
-                    try:
-                        os.remove(abs_pdf_path)
-                    except OSError as exc:
-                        raise RuntimeError(
-                            f"Unable to remove existing PDF before TechDraw export: {exc}"
-                        ) from exc
-
-                App.setActiveDocument(doc.Name)
-                App.ActiveDocument = doc
-
-                with contextlib.suppress(Exception):
-                    import FreeCADGui
-
-                    gui_doc = FreeCADGui.getDocument(doc.Name)
-                    FreeCADGui.setActiveDocument(doc.Name)
-                    FreeCADGui.ActiveDocument = gui_doc
-                    FreeCADGui.activateWorkbench("TechDrawWorkbench")
-
-                last_exc: Exception | None = None
-
-                if hasattr(TechDraw, "exportPageAsPdf"):
-                    try:
-                        TechDraw.exportPageAsPdf(page, abs_pdf_path)
-                    except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                        last_exc = exc
-                    else:
-                        last_exc = None
-
-                if last_exc is not None or not os.path.exists(abs_pdf_path):
-                    exporter = _ensure_techdraw_gui()
-                    try:
-                        exporter(page, abs_pdf_path)
-                        last_exc = None
-                    except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                        last_exc = exc
-
-                if last_exc is not None:
-                    raise RuntimeError(f"TechDraw export failed: {last_exc}")
-
-                deadline = time.time() + 10.0
-                while time.time() < deadline:
-                    if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
-                        break
-                    if TECHDRAW_QT_APP is not None:
-                        TECHDRAW_QT_APP.processEvents()
-                    time.sleep(0.1)
-
-                if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
-                    raise RuntimeError(
-                        f"TechDraw export did not produce a PDF at {abs_pdf_path}."
-                    )
         finally:
             # Remove temporary TechDraw artefacts so repeated runs keep the
             # document tidy and avoid name collisions.
@@ -1206,36 +1111,27 @@ def make_pdf_page_from_objects(
                 FreeCADGui.ActiveDocument = gui_doc
                 FreeCADGui.activateWorkbench("TechDrawWorkbench")
 
-            last_exc: Exception | None = None
+            export_exc: Exception | None = None
 
             if hasattr(TechDraw, "exportPageAsPdf"):
                 try:
                     TechDraw.exportPageAsPdf(page, abs_pdf_path)
                 except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                    last_exc = exc
-                else:
-                    last_exc = None
-
-            if last_exc is not None or not os.path.exists(abs_pdf_path):
-                exporter = _ensure_techdraw_gui()
-                try:
-                    exporter(page, abs_pdf_path)
-                    last_exc = None
-                except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                    last_exc = exc
-
-            if last_exc is not None:
-                raise RuntimeError(f"TechDraw export failed: {last_exc}")
+                    export_exc = exc
+            else:
+                export_exc = RuntimeError(
+                    "TechDraw exportPageAsPdf unavailable in this FreeCAD build."
+                )
 
             deadline = time.time() + 10.0
             while time.time() < deadline:
                 if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
                     break
-                if TECHDRAW_QT_APP is not None:
-                    TECHDRAW_QT_APP.processEvents()
                 time.sleep(0.1)
 
             if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
+                if export_exc is not None:
+                    raise RuntimeError(f"TechDraw export failed: {export_exc}")
                 raise RuntimeError(
                     f"TechDraw export did not produce a PDF at {abs_pdf_path}."
                 )
@@ -1245,13 +1141,22 @@ def make_pdf_page_from_objects(
             print("[INFO] TechDraw unavailable and no PDF path supplied; skipping PDF export.")
             return
 
+        configure_fontconfig()
+
         try:
-            from PySide2 import QtCore, QtGui, QtPrintSupport
+            from PySide2 import QtCore, QtGui, QtPrintSupport, QtWidgets
         except Exception:  # pragma: no cover - depends on FreeCAD build
             try:
-                from PySide6 import QtCore, QtGui, QtPrintSupport  # type: ignore[no-redef]
+                from PySide6 import QtCore, QtGui, QtPrintSupport, QtWidgets  # type: ignore[no-redef]
             except Exception as exc:  # pragma: no cover - depends on FreeCAD build
                 raise RuntimeError(f"Qt bindings unavailable for PDF fallback: {exc}")
+
+        qt_app = QtWidgets.QApplication.instance()
+        created_qt_app = False
+        if qt_app is None:
+            qt_app = QtWidgets.QApplication([])
+            qt_app.setQuitOnLastWindowClosed(False)
+            created_qt_app = True
 
         shapes = [getattr(obj, "Shape", None) for obj in objects]
         shapes = [shape for shape in shapes if shape is not None and not shape.isNull()]
@@ -1353,6 +1258,10 @@ def make_pdf_page_from_objects(
 
         print(f"[INFO] Qt PDF fallback wrote {out_pdf_path}")
 
+        if created_qt_app:
+            qt_app.processEvents()
+            qt_app.quit()
+
     backend = pdf_backend.lower()
     if backend not in PDF_BACKENDS:
         raise ValueError(f"Unsupported PDF backend '{pdf_backend}'")
@@ -1362,7 +1271,11 @@ def make_pdf_page_from_objects(
             raise RuntimeError(
                 "TechDraw backend requested but TechDraw module is unavailable."
             )
-        _techdraw_pdf()
+        try:
+            _techdraw_pdf()
+        except Exception as exc:
+            print(f"[WARN] TechDraw export failed ({exc}); using Qt fallback.")
+            _qt_pdf_fallback()
         return
 
     if backend == "qt":
