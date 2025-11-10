@@ -1,0 +1,74 @@
+name: Build wheelbarrow fabrication artifacts
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  generate-artifacts:
+    runs-on: ubuntu-22.04
+    env:
+      WHEELBARROW_EXPORT_DIR: ${{ github.workspace }}/wheelbarrow_build/exports
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-glx \
+            libglu1-mesa \
+            libxrender1 \
+            libxkbcommon-x11-0 \
+            libegl1 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-xinerama0 \
+            libxcb-xkb1 \
+            xz-utils
+
+      - name: Download FreeCAD AppImage
+        run: |
+          set -euo pipefail
+          FC_VERSION="1.0.2"
+          APPIMAGE="FreeCAD_${FC_VERSION}-conda-Linux-x86_64-py311.AppImage"
+          curl -L -o FreeCAD.AppImage "https://github.com/FreeCAD/FreeCAD/releases/download/${FC_VERSION}/${APPIMAGE}"
+          chmod +x FreeCAD.AppImage
+          ./FreeCAD.AppImage --appimage-extract
+
+      - name: Run wheelbarrow macro
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          mkdir -p "${WHEELBARROW_EXPORT_DIR}"
+          ./squashfs-root/usr/bin/freecadcmd macros/MiniWheelbarrow.FCMacro
+
+      - name: Bundle fabrication outputs
+        run: |
+          set -euo pipefail
+          EXPORT_DIR="$WHEELBARROW_EXPORT_DIR"
+          if [ ! -d "$EXPORT_DIR" ]; then
+            echo "Expected export directory $EXPORT_DIR not found" >&2
+            ls -R "$(dirname "$EXPORT_DIR")" || true
+            exit 1
+          fi
+          mkdir -p wheelbarrow-artifacts/raw
+          rsync -a --delete "$EXPORT_DIR"/ wheelbarrow-artifacts/raw/
+          tar -czf wheelbarrow-artifacts/wheelbarrow-fabrication.tar.gz -C "$EXPORT_DIR" .
+          ls -R wheelbarrow-artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheelbarrow-fabrication-assets
+          path: wheelbarrow-artifacts
+          if-no-files-found: error

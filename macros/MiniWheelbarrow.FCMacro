@@ -1,0 +1,549 @@
+import os
+import math
+
+import FreeCAD as App
+try:
+    import FreeCADGui as Gui  # noqa: F401  # Imported for macro compatibility
+except Exception:  # pragma: no cover - freecadcmd lacks GUI module
+    Gui = None
+import Part
+import Draft
+
+try:  # TechDraw is GUI-only; guard imports for headless execution
+    import TechDraw
+
+    HAVE_TECHDRAW = True
+except Exception:  # pragma: no cover - TechDraw unavailable in headless setups
+    HAVE_TECHDRAW = False
+
+
+DOC_NAME = "MiniWheelbarrow"
+
+EXPORT_DIR = os.environ.get("WHEELBARROW_EXPORT_DIR")
+if EXPORT_DIR:
+    EXPORT_DIR = os.path.abspath(os.path.expanduser(EXPORT_DIR))
+else:
+    EXPORT_DIR = os.path.join(App.getUserAppDataDir(), "Wheelbarrow_Drawings")
+os.makedirs(EXPORT_DIR, exist_ok=True)
+
+
+def resolve_template_path():
+    """Return a valid TechDraw template or ``None`` if none is available."""
+
+    base_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    candidates = [
+        "A4_LandscapeTD.svg",
+        "A4_Landscape_blank.svg",
+        "A3_Landscape_blank.svg",
+    ]
+    for candidate in candidates:
+        template_path = os.path.join(base_dir, candidate)
+        if os.path.exists(template_path):
+            return template_path
+    App.Console.PrintWarning(
+        f"[TechDraw] No template available in {base_dir}. Skipping pages.\n"
+    )
+    return None
+
+# -------------------------------
+# Parameters (millimetres)
+# -------------------------------
+P = {
+    # Rails/handles
+    "rail_len": 500.0,
+    "rail_w_rear": 40.0,  # at x=0..300 (width along -Y)
+    "rail_w_front": 25.0,  # at x=500
+    "rail_taper_start": 300.0,  # x where taper starts
+    "rail_thick": 15.0,  # Z thickness (extrude)
+    "handle_taper_len": 200.0,
+    "axle_from_front": 40.0,  # hole position from rail front
+    "axle_diam": 6.0,
+
+    # Tray
+    "tray_len": 260.0,
+    "tray_w_rear": 150.0,  # Inner width between rails
+    "tray_w_front": 70.0,
+    "tray_depth": 70.0,  # panel height for sides/front
+    "tray_panel_thk": 10.0,  # 10–12 mm
+
+    # Sub-structure
+    "spreader_len": 120.0,
+    "spreader_h": 30.0,
+    "wood_thk": 15.0,  # Used for substructure thickness
+
+    "leg_h": 70.0,
+    "leg_w": 25.0,
+
+    "axblk_len": 80.0,
+    "axblk_w": 25.0,
+
+    # Wheel
+    "wheel_diam": 120.0,
+    "wheel_thk": 15.0,
+}
+
+
+def ensure_doc(name: str) -> App.Document:
+    """Return the existing FreeCAD document or create a fresh one."""
+
+    if App.ActiveDocument and App.ActiveDocument.Name == name:
+        return App.ActiveDocument
+    if name in App.listDocuments().keys():
+        return App.getDocument(name)
+    return App.newDocument(name)
+
+
+def make_polyface(points):
+    """Create planar face from closed polyline points [(x, y), ...] in XY plane."""
+
+    edges = []
+    for i in range(len(points)):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % len(points)]
+        edges.append(
+            Part.LineSegment(App.Vector(x1, y1, 0), App.Vector(x2, y2, 0)).toShape()
+        )
+    wire = Part.Wire(edges)
+    return Part.Face(wire)
+
+
+def extrude(face, thickness):
+    """Extrude a planar face along +Z."""
+
+    return face.extrude(App.Vector(0, 0, thickness))
+
+
+def add_obj(document: App.Document, shape, name, placement=None):
+    """Add a Part::Feature to the active document."""
+
+    obj = document.addObject("Part::Feature", name)
+    obj.Shape = shape
+    if placement is not None:
+        obj.Placement = placement
+    return obj
+
+
+def dxf_svg_export(document: App.Document, shape_obj, base_name):
+    """Exports the 2D projection (top view) of a solid shape."""
+
+    shape2d = Draft.makeShape2DView(shape_obj, App.Vector(0, 0, 1))
+    document.recompute()
+
+    dxf_path = os.path.join(EXPORT_DIR, f"{base_name}.dxf")
+    svg_path = os.path.join(EXPORT_DIR, f"{base_name}.svg")
+
+    try:
+        import importDXF
+
+        importDXF.export([shape2d], dxf_path)
+    except Exception as exc:  # pragma: no cover - export errors reported at runtime
+        App.Console.PrintWarning(f"[DXF] export failed {base_name}: {exc}\n")
+    try:
+        import importSVG
+
+        importSVG.export([shape2d], svg_path)
+    except Exception as exc:  # pragma: no cover - export errors reported at runtime
+        App.Console.PrintWarning(f"[SVG] export failed {base_name}: {exc}\n")
+
+    document.removeObject(shape2d.Name)
+
+
+def techdraw_page_for(document: App.Document, obj, title):
+    """Create a TechDraw page with a 1:1 top view and simple dimensions."""
+
+    if not HAVE_TECHDRAW:
+        App.Console.PrintMessage(
+            "[TechDraw] Not available (headless or missing). Skipping pages.\n"
+        )
+        return None
+
+    template_path = resolve_template_path()
+    if not template_path:
+        return None
+
+    safe_title = title.replace(" ", "_")
+
+    page_name = f"TD_{safe_title}"
+    if page_name in document.Objects:
+        page = document.getObject(page_name)
+    else:
+        page = document.addObject("TechDraw::DrawPage", page_name)
+
+    tpl_name = f"TPL_{safe_title}"
+    if tpl_name in document.Objects:
+        template = document.getObject(tpl_name)
+    else:
+        template = document.addObject("TechDraw::DrawSVGTemplate", tpl_name)
+    try:
+        template.Template = template_path
+    except Exception as exc:  # pragma: no cover - template assignment issues
+        App.Console.PrintWarning(
+            f"[TechDraw] Failed to assign template for {title}: {exc}\n"
+        )
+        return None
+    page.Template = template
+
+    view_name = f"View_{safe_title}"
+    if view_name in document.Objects:
+        view = document.getObject(view_name)
+    else:
+        view = document.addObject("TechDraw::DrawViewPart", view_name)
+    view.Source = [obj]
+    view.Direction = App.Vector(0, 0, 1)
+    view.Scale = 1.0
+    if view not in page.Views:
+        page.addView(view)
+    document.recompute()
+
+    try:
+        bb = obj.Shape.BoundBox
+        ann_name = f"Ann_{safe_title}"
+        if ann_name in document.Objects:
+            annotation = document.getObject(ann_name)
+        else:
+            annotation = document.addObject("TechDraw::DrawViewAnnotation", ann_name)
+        annotation.Text = [
+            f"{title}",
+            f"L={round(bb.XLength, 2)} mm",
+            f"W={round(bb.YLength, 2)} mm",
+            f"T={round(bb.ZLength, 2)} mm",
+        ]
+        if annotation not in page.Views:
+            page.addView(annotation)
+        document.recompute()
+    except Exception as exc:  # pragma: no cover - bounding box failures
+        App.Console.PrintWarning(f"[TechDraw] Annotation failed {title}: {exc}\n")
+
+    return page
+
+
+def make_wheelbarrow_assembly(shapes, params):
+    """Assemble individual part shapes into a single compound object."""
+
+    rail_w = params["rail_w_rear"]
+    rail_thk = params["rail_thick"]
+    tray_w = params["tray_w_rear"]
+
+    p_rail_left = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0, 0, 1), 0))
+    p_rail_right = App.Placement(
+        App.Vector(0, -(rail_w + tray_w), 0), App.Rotation(App.Vector(0, 0, 1), 0)
+    )
+
+    p_tray_bottom = App.Placement(
+        App.Vector(0, -(rail_w + tray_w / 2.0), rail_thk),
+        App.Rotation(App.Vector(0, 0, 1), 0),
+    )
+
+    rotation_side = App.Rotation(App.Vector(1, 0, 0), 90)
+    panel_thk = params["tray_panel_thk"]
+    p_side_left = App.Placement(
+        App.Vector(0, -rail_w - panel_thk, rail_thk + panel_thk), rotation_side
+    )
+    p_side_right = App.Placement(
+        App.Vector(0, -(rail_w + tray_w) + panel_thk, rail_thk + panel_thk),
+        rotation_side,
+    )
+
+    p_front = App.Placement(
+        App.Vector(params["tray_len"] - panel_thk, -115, rail_thk + panel_thk),
+        rotation_side,
+    )
+
+    ax_x_center = params["rail_len"] - params["axle_from_front"]
+    axblk_x_start = ax_x_center - params["axblk_len"] / 2.0
+    p_axle_block = App.Placement(
+        App.Vector(
+            axblk_x_start, -(rail_w / 2.0 + params["axblk_w"] / 2.0), 0
+        ),
+        App.Rotation(App.Vector(0, 0, 1), 0),
+    )
+
+    rotation_wheel = App.Rotation(App.Vector(0, 1, 0), 90)
+    p_wheel = App.Placement(
+        App.Vector(ax_x_center, -115, rail_thk / 2.0), rotation_wheel
+    )
+
+    rotation_spreader = App.Rotation(App.Vector(1, 0, 0), 90) * App.Rotation(
+        App.Vector(0, 0, 1), 90
+    )
+    spreader_thk = params["wood_thk"]
+    spreader_len = params["spreader_len"]
+    p_spreader_rear = App.Placement(
+        App.Vector(spreader_thk, -115 - spreader_len / 2.0, 0), rotation_spreader
+    )
+    p_spreader_front = App.Placement(
+        App.Vector(params["tray_len"] - rail_thk, -115 - spreader_len / 2.0, 0),
+        rotation_spreader,
+    )
+
+    rotation_leg = App.Rotation(App.Vector(1, 0, 0), 90) * App.Rotation(
+        App.Vector(0, 0, 1), 90
+    )
+    leg_w = params["leg_w"]
+    p_leg_left = App.Placement(
+        App.Vector(spreader_thk * 2, -rail_w - leg_w, 0), rotation_leg
+    )
+    p_leg_right = App.Placement(
+        App.Vector(spreader_thk * 2, -(rail_w + tray_w), 0), rotation_leg
+    )
+
+    def placed_shape(key, placement):
+        shape_copy = shapes[key].copy()
+        shape_copy.Placement = placement
+        return shape_copy
+
+    parts_to_fuse = [
+        placed_shape("Rail_Base", p_rail_left),
+        placed_shape("Rail_Base", p_rail_right),
+        placed_shape("Tray_Bottom_Base", p_tray_bottom),
+        placed_shape("Side_Panel_Base", p_side_left),
+        placed_shape("Side_Panel_Base", p_side_right),
+        placed_shape("Front_Panel_Base", p_front),
+        placed_shape("Spreader_Base", p_spreader_rear),
+        placed_shape("Spreader_Base", p_spreader_front),
+        placed_shape("Leg_Base", p_leg_left),
+        placed_shape("Leg_Base", p_leg_right),
+        placed_shape("Axle_Block_Base", p_axle_block),
+        placed_shape("Wheel_Base", p_wheel),
+    ]
+
+    return Part.makeCompound(parts_to_fuse)
+
+
+doc = ensure_doc(DOC_NAME)
+shapes = {}
+
+
+# 1) Rails (Base shape) — tapered profile + axle hole mark
+
+def rail_profile_points():
+    length = P["rail_len"]
+    width_rear = P["rail_w_rear"]
+    width_front = P["rail_w_front"]
+    taper_start = P["rail_taper_start"]
+    return [
+        (0.0, 0.0),
+        (length, 0.0),
+        (length, -width_front),
+        (taper_start, -width_rear),
+        (0.0, -width_rear),
+    ]
+
+
+rail_face = make_polyface(rail_profile_points())
+rail_solid = extrude(rail_face, P["rail_thick"])
+
+
+def local_width_at_x(x_pos):
+    if x_pos <= P["rail_taper_start"]:
+        return P["rail_w_rear"]
+    taper_ratio = (x_pos - P["rail_taper_start"]) / (
+        P["rail_len"] - P["rail_taper_start"]
+    )
+    return P["rail_w_rear"] - (P["rail_w_rear"] - P["rail_w_front"]) * taper_ratio
+
+
+ax_x = P["rail_len"] - P["axle_from_front"]
+ax_w = local_width_at_x(ax_x)
+ax_y = -ax_w / 2.0
+ax_r = P["axle_diam"] / 2.0
+
+ax_cyl = Part.makeCylinder(ax_r, P["rail_thick"], App.Vector(ax_x, ax_y, 0), App.Vector(0, 0, 1))
+rail_solid_cut = rail_solid.cut(ax_cyl)
+shapes["Rail_Base"] = rail_solid_cut
+
+rail_left = add_obj(doc, shapes["Rail_Base"], "Rail_Left")
+rail_right = add_obj(
+    doc,
+    shapes["Rail_Base"].copy(),
+    "Rail_Right",
+    App.Placement(
+        App.Vector(0, -(P["rail_w_rear"] + 20.0), 0),
+        App.Rotation(App.Vector(0, 0, 1), 0),
+    ),
+)
+
+
+# 2) Tray bottom
+tray_length = P["tray_len"]
+tray_width_rear = P["tray_w_rear"]
+tray_width_front = P["tray_w_front"]
+tray_points = [
+    (0, tray_width_rear / 2.0),
+    (tray_length, tray_width_front / 2.0),
+    (tray_length, -tray_width_front / 2.0),
+    (0, -tray_width_rear / 2.0),
+]
+tray_face = make_polyface(tray_points)
+tray_bottom_solid = extrude(tray_face, P["tray_panel_thk"])
+shapes["Tray_Bottom_Base"] = tray_bottom_solid
+tray_bottom = add_obj(doc, shapes["Tray_Bottom_Base"], "Tray_Bottom")
+
+
+# 3) Side panels
+side_face = make_polyface(
+    [(0, 0), (tray_length, 0), (tray_length, P["tray_depth"]), (0, P["tray_depth"])]
+)
+side_panel_solid = extrude(side_face, P["tray_panel_thk"])
+shapes["Side_Panel_Base"] = side_panel_solid
+
+side_panel_left = add_obj(doc, shapes["Side_Panel_Base"], "Tray_Side_1")
+side_panel_right = add_obj(
+    doc,
+    shapes["Side_Panel_Base"].copy().translate(App.Vector(0, -(P["tray_depth"] + 20.0), 0)),
+    "Tray_Side_2",
+)
+
+
+# 4) Front panel with curved top
+front_panel_width = P["tray_w_front"]
+front_panel_height = P["tray_depth"]
+edge_bottom = Part.LineSegment(App.Vector(front_panel_width, 0, 0), App.Vector(0, 0, 0)).toShape()
+edge_left = Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, front_panel_height, 0)).toShape()
+edge_right = Part.LineSegment(
+    App.Vector(front_panel_width, front_panel_height, 0),
+    App.Vector(front_panel_width, 0, 0),
+).toShape()
+
+radius = front_panel_width / 2.0
+circle = Part.makeCircle(radius, App.Vector(radius, front_panel_height, 0), App.Vector(0, 0, 1), 0, 180)
+edge_arc = Part.ArcOfCircle(circle.Curve, math.radians(180), math.radians(0)).toShape()
+
+wire = Part.Wire([edge_left, edge_arc, edge_right, edge_bottom])
+front_face = Part.Face(wire)
+front_panel_solid = extrude(front_face, P["tray_panel_thk"])
+shapes["Front_Panel_Base"] = front_panel_solid
+front_panel = add_obj(doc, shapes["Front_Panel_Base"], "Tray_Front")
+
+
+# 5) Spreaders
+spreader_face = make_polyface(
+    [
+        (0, 0),
+        (P["spreader_len"], 0),
+        (P["spreader_len"], P["spreader_h"]),
+        (0, P["spreader_h"]),
+    ]
+)
+spreader_solid = extrude(spreader_face, P["wood_thk"])
+shapes["Spreader_Base"] = spreader_solid
+
+spreader_rear = add_obj(doc, shapes["Spreader_Base"], "Spreader_1")
+spreader_front = add_obj(
+    doc,
+    shapes["Spreader_Base"].copy().translate(
+        App.Vector(0, -(P["spreader_h"] + 20.0), 0)
+    ),
+    "Spreader_2",
+)
+
+
+# 6) Legs
+leg_face = make_polyface(
+    [(0, 0), (P["leg_w"], 0), (P["leg_w"], P["leg_h"]), (0, P["leg_h"])]
+)
+leg_solid = extrude(leg_face, P["wood_thk"])
+shapes["Leg_Base"] = leg_solid
+
+leg_left = add_obj(doc, shapes["Leg_Base"], "Leg_1")
+leg_right = add_obj(
+    doc,
+    shapes["Leg_Base"].copy().translate(App.Vector(0, -(P["leg_h"] + 20.0), 0)),
+    "Leg_2",
+)
+
+
+# 7) Axle block
+axle_block_face = make_polyface(
+    [
+        (0, 0),
+        (P["axblk_len"], 0),
+        (P["axblk_len"], P["axblk_w"]),
+        (0, P["axblk_w"]),
+    ]
+)
+axle_block_solid = extrude(axle_block_face, P["wood_thk"])
+axle_block_box = axle_block_solid.BoundBox
+axle_block_center = App.Vector(
+    (axle_block_box.XMax + axle_block_box.XMin) / 2.0,
+    (axle_block_box.YMax + axle_block_box.YMin) / 2.0,
+    0,
+)
+axle_block_cyl = Part.makeCylinder(
+    P["axle_diam"] / 2.0, P["wood_thk"], axle_block_center, App.Vector(0, 0, 1)
+)
+axle_block_solid_cut = axle_block_solid.cut(axle_block_cyl)
+shapes["Axle_Block_Base"] = axle_block_solid_cut
+axle_block = add_obj(doc, shapes["Axle_Block_Base"], "Axle_Block")
+
+
+# 8) Wheel
+wheel_solid = Part.makeCylinder(P["wheel_diam"] / 2.0, P["wheel_thk"])
+wheel_bore = Part.makeCylinder(
+    P["axle_diam"] / 2.0, P["wheel_thk"], App.Vector(0, 0, 0), App.Vector(0, 0, 1)
+)
+wheel_solid_cut = wheel_solid.cut(wheel_bore)
+shapes["Wheel_Base"] = wheel_solid_cut
+wheel = add_obj(doc, shapes["Wheel_Base"], "Wheel")
+
+doc.recompute()
+
+App.Console.PrintMessage("\n--- Exporting DXF/SVG (1:1 profiles) ---\n")
+for obj, name in [
+    (rail_left, "Rail_Left"),
+    (tray_bottom, "Tray_Bottom"),
+    (side_panel_left, "Tray_Side"),
+    (front_panel, "Tray_Front"),
+    (spreader_rear, "Spreader"),
+    (leg_left, "Leg"),
+    (axle_block, "Axle_Block"),
+    (wheel, "Wheel"),
+]:
+    dxf_svg_export(doc, obj, name)
+
+App.Console.PrintMessage("\n--- Creating Wheelbarrow Assembly Solid ---\n")
+assembly_solid = make_wheelbarrow_assembly(shapes, P)
+assembly_obj = add_obj(doc, assembly_solid, "Wheelbarrow_Assembly")
+doc.recompute()
+
+if HAVE_TECHDRAW:
+    App.Console.PrintMessage("\n--- Creating TechDraw Pages ---\n")
+    part_list = [
+        (rail_left, "Rail Left"),
+        (tray_bottom, "Tray Bottom"),
+        (side_panel_left, "Tray Side"),
+        (front_panel, "Tray Front"),
+        (spreader_rear, "Spreader"),
+        (leg_left, "Leg"),
+        (axle_block, "Axle Block"),
+        (wheel, "Wheel"),
+        (assembly_obj, "Complete Assembly"),
+    ]
+
+    for obj, title in part_list:
+        page = techdraw_page_for(doc, obj, title)
+        if page:
+            pdf_path = os.path.join(EXPORT_DIR, f"{title.replace(' ', '_')}.pdf")
+            if hasattr(TechDraw, "exportPageAsPdf"):
+                try:
+                    TechDraw.exportPageAsPdf(page, pdf_path)
+                except Exception as exc:  # pragma: no cover - TechDraw export may fail
+                    App.Console.PrintWarning(
+                        f"[TechDraw] PDF export failed {title}: {exc}\n"
+                    )
+            else:
+                App.Console.PrintMessage(
+                    "[TechDraw] exportPageAsPdf not available in this build. Skipping PDF export.\n"
+                )
+
+
+doc_path = os.path.join(EXPORT_DIR, f"{DOC_NAME}.FCStd")
+try:
+    doc.saveAs(doc_path)
+except Exception as exc:  # pragma: no cover - filesystem permissions
+    App.Console.PrintWarning(f"[Save] Could not save FCStd: {exc}\n")
+
+App.Console.PrintMessage(f"\nDone.\nFiles in: {EXPORT_DIR}\n")
+App.Console.PrintMessage(
+    "Exports: *.dxf, *.svg per part; TechDraw PDFs if available; FCStd model saved.\n"
+)
