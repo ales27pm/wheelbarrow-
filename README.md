@@ -60,7 +60,7 @@ All linear dimensions can be scaled uniformly via `--scale` (for example, `--sca
 
 Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs (both as individual files under `raw/` and as a single `wheelbarrow-fabrication.tar.gz` archive).
 
-For lighter-weight automation focused solely on the 2D fabrication drawings, the **Generate wheelbarrow drawing plans** workflow executes `generate_wheelbarrow_drawings.py` with the same FreeCAD AppImage. It emits the DXF, SVG, and PDF (when TechDraw is available) deliverables to an artifact named `wheelbarrow-drawing-plans`, mirroring the CLI example above so you can fetch ready-to-print templates without building the full parametric model.
+For lightweight automation focused solely on the 2D fabrication drawings, the **Generate wheelbarrow drawing plans** workflow executes `generate_wheelbarrow_drawings.py` with the same FreeCAD AppImage. It emits the DXF, SVG, and PDF (when TechDraw is available) deliverables to an artifact named `wheelbarrow-drawing-plans`, mirroring the CLI example above so you can fetch ready-to-print templates without building the full parametric model.
 
 ## Notes
 

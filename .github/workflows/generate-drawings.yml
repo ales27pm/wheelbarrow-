@@ -15,43 +15,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgl1-mesa-glx \
-            libglu1-mesa \
-            libxrender1 \
-            libxkbcommon-x11-0 \
-            libegl1 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-shape0 \
-            libxcb-xinerama0 \
-            libxcb-xkb1 \
-            xz-utils
+      - name: Cache FreeCAD AppImage payload
+        id: cache-freecad
+        uses: actions/cache@v4
+        with:
+          path: .freecad/appimage-1.0.2
+          key: ${{ runner.os }}-freecad-1.0.2
 
-      - name: Download FreeCAD AppImage
-        run: |
-          set -euo pipefail
-          FC_VERSION="1.0.2"
-          APPIMAGE="FreeCAD_${FC_VERSION}-conda-Linux-x86_64-py311.AppImage"
-          curl -L -o FreeCAD.AppImage "https://github.com/FreeCAD/FreeCAD/releases/download/${FC_VERSION}/${APPIMAGE}"
-          chmod +x FreeCAD.AppImage
-          ./FreeCAD.AppImage --appimage-extract
+      - name: Prepare FreeCAD AppImage
+        run: ./setup.sh --prepare-appimage
 
       - name: Generate 2D drawing exports
         env:
           QT_QPA_PLATFORM: offscreen
+          FREECADPATH: ${{ env.FREECAD_APPIMAGE_DIR }}/squashfs-root/usr/lib/freecad/lib
         run: |
           set -euo pipefail
           mkdir -p "${DRAWING_OUTPUT_DIR}"
-          ./squashfs-root/usr/bin/freecadcmd \
+          "${FREECADCMD_PATH}" \
             generate_wheelbarrow_drawings.py \
+            -- \
             --out "${DRAWING_OUTPUT_DIR}" \
             --paper Tabloid \
             --scale 1.0 \

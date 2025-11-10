@@ -20,7 +20,7 @@ import argparse
 import math
 import os
 import sys
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
 import FreeCAD as App
@@ -91,6 +91,8 @@ DEFAULT_PAPER = "A4"
 # Helpers
 # -----------------------------
 Vector2D = Tuple[float, float]
+DimSpec = Tuple[Vector2D, Vector2D, Vector2D]
+TextSpec = Tuple[str, Vector2D, float]
 
 
 def ensure_dir(path: str) -> None:
@@ -101,8 +103,8 @@ def ensure_dir(path: str) -> None:
 def recompute(doc: App.Document) -> None:
     try:
         doc.recompute()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[WARN] Document recompute failed: {exc}")
 
 
 def add_text(doc: App.Document, text: str, pos: Vector2D, *, size: float = 4.0) -> App.DocumentObject:
@@ -146,6 +148,20 @@ def rectangle_xywh(x: float, y: float, w: float, h: float) -> App.DocumentObject
     return polygon_wire(pts)
 
 
+def annotate(
+    doc: App.Document,
+    *,
+    dims: Sequence[DimSpec] | None = None,
+    texts: Sequence[TextSpec] | None = None,
+) -> None:
+    """Create Draft dimensions and annotations in a single batch."""
+
+    for start, end, location in dims or ():
+        add_linear_dimension(doc, start, end, location)
+    for content, position, size in texts or ():
+        add_text(doc, content, position, size=size)
+
+
 def arc_top_panel(
     x: float,
     y: float,
@@ -160,7 +176,7 @@ def arc_top_panel(
 
     f = arc_height
     c = w
-    R = (f * f + (c / 2.0) ** 2.0) / (2.0 * f)
+    R = (f**2 + (c / 2.0) ** 2.0) / (2.0 * f)
     x_c = x + w / 2.0
     y_c = y + body_h - (R - f)
 
@@ -234,23 +250,31 @@ def make_rails(
     circ = circle(center=(cx, cy), radius=axle_d / 2.0)
     circ.Label = f"{label}_AXLE_HOLE"
 
-    add_linear_dimension(doc, xform((0.0, -w0 - 6.0)), xform((L, -w1 - 6.0)), xform((L / 2.0, -w0 - 14.0)))
-    add_linear_dimension(doc, xform((0.0, 0.0)), xform((0.0, -w0)), xform((-15.0, -w0 / 2.0)))
-    add_linear_dimension(doc, xform((L, 0.0)), xform((L, -w1)), xform((L + 15.0, -w1 / 2.0)))
-    add_linear_dimension(
+    annotate(
         doc,
-        xform((L, -w1 - 20.0)),
-        xform((x_axle_local, -w1 - 20.0)),
-        xform(((L + x_axle_local) / 2.0, -w1 - 28.0)),
+        dims=[
+            (
+                xform((0.0, -w0 - 6.0)),
+                xform((L, -w1 - 6.0)),
+                xform((L / 2.0, -w0 - 14.0)),
+            ),
+            (xform((0.0, 0.0)), xform((0.0, -w0)), xform((-15.0, -w0 / 2.0))),
+            (xform((L, 0.0)), xform((L, -w1)), xform((L + 15.0, -w1 / 2.0))),
+            (
+                xform((L, -w1 - 20.0)),
+                xform((x_axle_local, -w1 - 20.0)),
+                xform(((L + x_axle_local) / 2.0, -w1 - 28.0)),
+            ),
+        ],
+        texts=[
+            (
+                f"{label} — L={L}  w_rear={w0}  w_front={w1}  axle Ø{axle_d}",
+                (origin[0] + (L * 0.5), origin[1] + 8.0),
+                4.0,
+            )
+        ],
     )
     add_diameter_dimension(doc, (cx, cy), axle_d / 2.0, (cx, cy + 12.0))
-
-    add_text(
-        doc,
-        f"{label} — L={L}  w_rear={w0}  w_front={w1}  axle Ø{axle_d}",
-        (origin[0] + (L * 0.5), origin[1] + 8.0),
-        size=4.0,
-    )
 
     recompute(doc)
     return [wire, circ]
@@ -276,21 +300,33 @@ def make_trapezoid_bottom(
     wire = polygon_wire(pts)
     wire.Label = f"{label}_TRAPEZOID"
 
-    add_linear_dimension(
+    annotate(
         doc,
-        (origin[0], origin[1] - wr / 2.0 - 10.0),
-        (origin[0] + L, origin[1] - wr / 2.0 - 10.0),
-        (origin[0] + L / 2.0, origin[1] - wr / 2.0 - 18.0),
+        dims=[
+            (
+                (origin[0], origin[1] - wr / 2.0 - 10.0),
+                (origin[0] + L, origin[1] - wr / 2.0 - 10.0),
+                (origin[0] + L / 2.0, origin[1] - wr / 2.0 - 18.0),
+            ),
+            (
+                (origin[0], origin[1] + wr / 2.0),
+                (origin[0], origin[1] - wr / 2.0),
+                (origin[0] - 12.0, origin[1]),
+            ),
+            (
+                (origin[0] + L, origin[1] + wf / 2.0),
+                (origin[0] + L, origin[1] - wf / 2.0),
+                (origin[0] + L + 12.0, origin[1]),
+            ),
+        ],
+        texts=[
+            (
+                f"{label} — L={L}  Wrear={wr}  Wfront={wf}",
+                (origin[0] + L / 2.0, origin[1] + wr / 2.0 + 8.0),
+                4.0,
+            )
+        ],
     )
-    add_linear_dimension(doc, (origin[0], origin[1] + wr / 2.0), (origin[0], origin[1] - wr / 2.0), (origin[0] - 12.0, origin[1]))
-    add_linear_dimension(
-        doc,
-        (origin[0] + L, origin[1] + wf / 2.0),
-        (origin[0] + L, origin[1] - wf / 2.0),
-        (origin[0] + L + 12.0, origin[1]),
-    )
-
-    add_text(doc, f"{label} — L={L}  Wrear={wr}  Wfront={wf}", (origin[0] + L / 2.0, origin[1] + wr / 2.0 + 8.0), size=4.0)
     recompute(doc)
     return [wire]
 
@@ -307,18 +343,27 @@ def make_side_panel(
     rect = rectangle_xywh(origin[0], origin[1], L, H)
     rect.Label = f"{label}_RECT"
 
-    add_linear_dimension(doc, (origin[0], origin[1] - 8.0), (origin[0] + L, origin[1] - 8.0), (origin[0] + L / 2.0, origin[1] - 15.0))
-    add_linear_dimension(
+    annotate(
         doc,
-        (origin[0] + L + 8.0, origin[1]),
-        (origin[0] + L + 8.0, origin[1] + H),
-        (origin[0] + L + 16.0, origin[1] + H / 2.0),
-    )
-    add_text(
-        doc,
-        f"{label} — {L} × {H} (panel thickness {params['wood_thick_panels']} mm)",
-        (origin[0] + L / 2.0, origin[1] + H + 6.0),
-        size=4.0,
+        dims=[
+            (
+                (origin[0], origin[1] - 8.0),
+                (origin[0] + L, origin[1] - 8.0),
+                (origin[0] + L / 2.0, origin[1] - 15.0),
+            ),
+            (
+                (origin[0] + L + 8.0, origin[1]),
+                (origin[0] + L + 8.0, origin[1] + H),
+                (origin[0] + L + 16.0, origin[1] + H / 2.0),
+            ),
+        ],
+        texts=[
+            (
+                f"{label} — {L} × {H} (panel thickness {params['wood_thick_panels']} mm)",
+                (origin[0] + L / 2.0, origin[1] + H + 6.0),
+                4.0,
+            )
+        ],
     )
     recompute(doc)
     return [rect]
@@ -337,18 +382,27 @@ def make_front_panel(
     poly = arc_top_panel(origin[0], origin[1], W, H, arc_height=arc_height, segments=36)
     poly.Label = f"{label}_CURVED_TOP"
 
-    add_linear_dimension(doc, (origin[0], origin[1] - 8.0), (origin[0] + W, origin[1] - 8.0), (origin[0] + W / 2.0, origin[1] - 15.0))
-    add_linear_dimension(
+    annotate(
         doc,
-        (origin[0] + W + 8.0, origin[1]),
-        (origin[0] + W + 8.0, origin[1] + H),
-        (origin[0] + W + 16.0, origin[1] + H / 2.0),
-    )
-    add_text(
-        doc,
-        f"{label} — {W} × {H} (curved top rise {arc_height})",
-        (origin[0] + W / 2.0, origin[1] + H + 6.0),
-        size=4.0,
+        dims=[
+            (
+                (origin[0], origin[1] - 8.0),
+                (origin[0] + W, origin[1] - 8.0),
+                (origin[0] + W / 2.0, origin[1] - 15.0),
+            ),
+            (
+                (origin[0] + W + 8.0, origin[1]),
+                (origin[0] + W + 8.0, origin[1] + H),
+                (origin[0] + W + 16.0, origin[1] + H / 2.0),
+            ),
+        ],
+        texts=[
+            (
+                f"{label} — {W} × {H} (curved top rise {arc_height})",
+                (origin[0] + W / 2.0, origin[1] + H + 6.0),
+                4.0,
+            )
+        ],
     )
     recompute(doc)
     return [poly]
@@ -364,28 +418,36 @@ def make_spreaders(
 ) -> List[App.DocumentObject]:
     L = params["spreader_length"]
     H = params["spreader_height"]
+    dims: List[DimSpec] = []
     objs: List[App.DocumentObject] = []
     for i in range(2):
         rect = rectangle_xywh(origin[0], origin[1] + i * (H + gap), L, H)
         rect.Label = f"{label}_{i + 1}"
-        add_linear_dimension(
-            doc,
-            (origin[0], origin[1] - gap + i * (H + gap)),
-            (origin[0] + L, origin[1] - gap + i * (H + gap)),
-            (origin[0] + L / 2.0, origin[1] - gap - 7.0 + i * (H + gap)),
+        dims.append(
+            (
+                (origin[0], origin[1] - gap + i * (H + gap)),
+                (origin[0] + L, origin[1] - gap + i * (H + gap)),
+                (origin[0] + L / 2.0, origin[1] - gap - 7.0 + i * (H + gap)),
+            )
         )
-        add_linear_dimension(
-            doc,
-            (origin[0] + L + gap, origin[1] + i * (H + gap)),
-            (origin[0] + L + gap, origin[1] + H + i * (H + gap)),
-            (origin[0] + L + gap * 2.0, origin[1] + H / 2.0 + i * (H + gap)),
+        dims.append(
+            (
+                (origin[0] + L + gap, origin[1] + i * (H + gap)),
+                (origin[0] + L + gap, origin[1] + H + i * (H + gap)),
+                (origin[0] + L + gap * 2.0, origin[1] + H / 2.0 + i * (H + gap)),
+            )
         )
         objs.append(rect)
-    add_text(
+    annotate(
         doc,
-        f"{label} ×2 — {L} × {H} × {params['wood_thick_struct']}",
-        (origin[0] + L / 2.0, origin[1] + 2 * (H + gap) + 4.0),
-        size=4.0,
+        dims=dims,
+        texts=[
+            (
+                f"{label} ×2 — {L} × {H} × {params['wood_thick_struct']}",
+                (origin[0] + L / 2.0, origin[1] + 2 * (H + gap) + 4.0),
+                4.0,
+            )
+        ],
     )
     recompute(doc)
     return objs
@@ -401,28 +463,36 @@ def make_legs(
 ) -> List[App.DocumentObject]:
     H = params["leg_height"]
     W = params["leg_width"]
+    dims: List[DimSpec] = []
     objs: List[App.DocumentObject] = []
     for i in range(2):
         rect = rectangle_xywh(origin[0] + i * (W + gap), origin[1], W, H)
         rect.Label = f"{label}_{i + 1}"
-        add_linear_dimension(
-            doc,
-            (origin[0] + i * (W + gap), origin[1] - gap),
-            (origin[0] + W + i * (W + gap), origin[1] - gap),
-            (origin[0] + W / 2.0 + i * (W + gap), origin[1] - gap - 7.0),
+        dims.append(
+            (
+                (origin[0] + i * (W + gap), origin[1] - gap),
+                (origin[0] + W + i * (W + gap), origin[1] - gap),
+                (origin[0] + W / 2.0 + i * (W + gap), origin[1] - gap - 7.0),
+            )
         )
-        add_linear_dimension(
-            doc,
-            (origin[0] + W + gap + i * (W + gap), origin[1]),
-            (origin[0] + W + gap + i * (W + gap), origin[1] + H),
-            (origin[0] + W + gap * 2.0 + i * (W + gap), origin[1] + H / 2.0),
+        dims.append(
+            (
+                (origin[0] + W + gap + i * (W + gap), origin[1]),
+                (origin[0] + W + gap + i * (W + gap), origin[1] + H),
+                (origin[0] + W + gap * 2.0 + i * (W + gap), origin[1] + H / 2.0),
+            )
         )
         objs.append(rect)
-    add_text(
+    annotate(
         doc,
-        f"{label} ×2 — {W} × {H} × {params['wood_thick_struct']}",
-        (origin[0] + (W + gap), origin[1] + H + 6.0),
-        size=4.0,
+        dims=dims,
+        texts=[
+            (
+                f"{label} ×2 — {W} × {H} × {params['wood_thick_struct']}",
+                (origin[0] + (W + gap), origin[1] + H + 6.0),
+                4.0,
+            )
+        ],
     )
     recompute(doc)
     return objs
@@ -443,20 +513,29 @@ def make_block(
     circ = circle((cx, cy), params["axle_diameter"] / 2.0)
     circ.Label = f"{label}_HOLE"
 
-    add_linear_dimension(doc, (origin[0], origin[1] - 8.0), (origin[0] + L, origin[1] - 8.0), (origin[0] + L / 2.0, origin[1] - 15.0))
-    add_linear_dimension(
+    annotate(
         doc,
-        (origin[0] + L + 8.0, origin[1]),
-        (origin[0] + L + 8.0, origin[1] + W),
-        (origin[0] + L + 16.0, origin[1] + W / 2.0),
+        dims=[
+            (
+                (origin[0], origin[1] - 8.0),
+                (origin[0] + L, origin[1] - 8.0),
+                (origin[0] + L / 2.0, origin[1] - 15.0),
+            ),
+            (
+                (origin[0] + L + 8.0, origin[1]),
+                (origin[0] + L + 8.0, origin[1] + W),
+                (origin[0] + L + 16.0, origin[1] + W / 2.0),
+            ),
+        ],
+        texts=[
+            (
+                f"{label} — {L} × {W} × {params['wood_thick_struct']}  trou Ø{params['axle_diameter']}",
+                (origin[0] + L / 2.0, origin[1] + W + 6.0),
+                4.0,
+            )
+        ],
     )
     add_diameter_dimension(doc, (cx, cy), params["axle_diameter"] / 2.0, (cx, cy + 10.0))
-    add_text(
-        doc,
-        f"{label} — {L} × {W} × {params['wood_thick_struct']}  trou Ø{params['axle_diameter']}",
-        (origin[0] + L / 2.0, origin[1] + W + 6.0),
-        size=4.0,
-    )
     recompute(doc)
     return [rect, circ]
 
@@ -492,63 +571,72 @@ def make_wheel(
 # Placement (layout)
 # -----------------------------
 def layout_parts(doc: App.Document, params: Dict[str, float], *, scale: float = 1.0) -> Dict[str, List[App.DocumentObject]]:
-    objs: Dict[str, List[App.DocumentObject]] = {}
-
-    offset = lambda value: value * scale
+    def offset(value: float) -> float:
+        return value * scale
 
     x0, y0 = 0.0, 0.0
 
-    objs["rail_left"] = make_rails(doc, params, origin=(x0, y0 + offset(350.0)), mirror_x=False, label="RAIL_LEFT")
-    objs["rail_right"] = make_rails(doc, params, origin=(x0, y0 + offset(200.0)), mirror_x=True, label="RAIL_RIGHT")
-
-    objs["bottom"] = make_trapezoid_bottom(doc, params, origin=(0.0, y0), label="BOTTOM")
-    objs["side_left"] = make_side_panel(
-        doc,
-        params,
-        origin=(params["box_inner_length"] + offset(20.0), y0),
-        label="SIDE_LEFT",
-    )
-    objs["side_right"] = make_side_panel(
-        doc,
-        params,
-        origin=(params["box_inner_length"] + offset(20.0), y0 + params["box_inner_depth"] + offset(20.0)),
-        label="SIDE_RIGHT",
-    )
-    objs["front"] = make_front_panel(
-        doc,
-        params,
-        origin=(params["box_inner_length"] * 2.0 + offset(50.0), y0),
-        label="FRONT_PANEL",
-    )
-
-    objs["spreaders"] = make_spreaders(
-        doc,
-        params,
-        origin=(0.0, y0 + offset(520.0)),
-        label="SPREADER",
-        gap=offset(8.0),
-    )
-    objs["legs"] = make_legs(
-        doc,
-        params,
-        origin=(params["spreader_length"] + offset(30.0), y0 + offset(520.0)),
-        label="LEG",
-        gap=offset(12.0),
-    )
-
-    objs["axle_block"] = make_block(
-        doc,
-        params,
-        origin=(params["spreader_length"] + offset(140.0), y0 + offset(520.0)),
-        label="AXLE_BLOCK",
-    )
-
-    objs["wheel"] = make_wheel(
-        doc,
-        params,
-        origin=(params["rail_length"] + offset(40.0), y0 + offset(220.0)),
-        label="WHEEL",
-    )
+    objs: Dict[str, List[App.DocumentObject]] = {
+        "rail_left": make_rails(
+            doc,
+            params,
+            origin=(x0, y0 + offset(350.0)),
+            mirror_x=False,
+            label="RAIL_LEFT",
+        ),
+        "rail_right": make_rails(
+            doc,
+            params,
+            origin=(x0, y0 + offset(200.0)),
+            mirror_x=True,
+            label="RAIL_RIGHT",
+        ),
+        "bottom": make_trapezoid_bottom(doc, params, origin=(0.0, y0), label="BOTTOM"),
+        "side_left": make_side_panel(
+            doc,
+            params,
+            origin=(params["box_inner_length"] + offset(20.0), y0),
+            label="SIDE_LEFT",
+        ),
+        "side_right": make_side_panel(
+            doc,
+            params,
+            origin=(params["box_inner_length"] + offset(20.0), y0 + params["box_inner_depth"] + offset(20.0)),
+            label="SIDE_RIGHT",
+        ),
+        "front": make_front_panel(
+            doc,
+            params,
+            origin=(params["box_inner_length"] * 2.0 + offset(50.0), y0),
+            label="FRONT_PANEL",
+        ),
+        "spreaders": make_spreaders(
+            doc,
+            params,
+            origin=(0.0, y0 + offset(520.0)),
+            label="SPREADER",
+            gap=offset(8.0),
+        ),
+        "legs": make_legs(
+            doc,
+            params,
+            origin=(params["spreader_length"] + offset(30.0), y0 + offset(520.0)),
+            label="LEG",
+            gap=offset(12.0),
+        ),
+        "axle_block": make_block(
+            doc,
+            params,
+            origin=(params["spreader_length"] + offset(140.0), y0 + offset(520.0)),
+            label="AXLE_BLOCK",
+        ),
+        "wheel": make_wheel(
+            doc,
+            params,
+            origin=(params["rail_length"] + offset(40.0), y0 + offset(220.0)),
+            label="WHEEL",
+        ),
+    }
 
     recompute(doc)
     return objs
@@ -558,8 +646,8 @@ def layout_parts(doc: App.Document, params: Dict[str, float], *, scale: float = 
 # Export helpers
 # -----------------------------
 def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> None:
-    dxf_path = out_path_base + ".dxf"
-    svg_path = out_path_base + ".svg"
+    dxf_path = f"{out_path_base}.dxf"
+    svg_path = f"{out_path_base}.svg"
     try:
         Import.export(list(objects), dxf_path)
     except Exception as exc:  # pragma: no cover - depends on FreeCAD environment
@@ -648,10 +736,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 
 
 def scaled_params(scale: float) -> Dict[str, float]:
-    params: Dict[str, float] = {}
-    for key, value in DEFAULT_PARAMS.items():
-        params[key] = value * scale
-    return params
+    return {key: value * scale for key, value in DEFAULT_PARAMS.items()}
 
 
 # -----------------------------

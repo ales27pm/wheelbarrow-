@@ -8,6 +8,22 @@ FREECAD_CACHE_DIR="${REPO_DIR}/.freecad"
 FREECAD_APPIMAGE_DIR="${FREECAD_CACHE_DIR}/appimage-${FREECAD_APPIMAGE_VERSION}"
 FREECAD_APPIMAGE_PATH="${FREECAD_APPIMAGE_DIR}/FreeCAD_${FREECAD_APPIMAGE_VERSION}.AppImage"
 FREECAD_APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_APPIMAGE_VERSION}/FreeCAD_${FREECAD_APPIMAGE_VERSION}-conda-Linux-x86_64-py311.AppImage"
+APPIMAGE_RUNTIME_DEPS=(
+    libgl1-mesa-glx
+    libglu1-mesa
+    libxrender1
+    libxkbcommon-x11-0
+    libegl1
+    libxcb-icccm4
+    libxcb-image0
+    libxcb-keysyms1
+    libxcb-randr0
+    libxcb-render-util0
+    libxcb-shape0
+    libxcb-xinerama0
+    libxcb-xkb1
+    xz-utils
+)
 
 info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
@@ -46,6 +62,17 @@ install_with_brew() {
     brew install python@3.12
 }
 
+install_appimage_runtime_deps() {
+    if command -v apt-get >/dev/null 2>&1; then
+        info "Installing FreeCAD AppImage runtime dependencies with apt-get"
+        need_cmd sudo
+        sudo apt-get update
+        sudo apt-get install -y "${APPIMAGE_RUNTIME_DEPS[@]}"
+    else
+        warn "AppImage runtime dependency installation is only automated for apt-get; please install equivalents manually."
+    fi
+}
+
 prepare_appimage() {
     need_cmd curl
     need_cmd chmod
@@ -67,6 +94,36 @@ prepare_appimage() {
 }
 
 main() {
+    if [[ $# -gt 0 ]]; then
+        case "$1" in
+            --prepare-appimage)
+                install_appimage_runtime_deps
+                prepare_appimage
+                if [[ -n "${GITHUB_ENV:-}" ]]; then
+                    {
+                        echo "FREECAD_APPIMAGE_DIR=${FREECAD_APPIMAGE_DIR}"
+                        echo "FREECADCMD_PATH=${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+                    } >>"${GITHUB_ENV}"
+                fi
+                info "FreeCAD AppImage ready at ${FREECAD_APPIMAGE_DIR}"
+                return 0
+                ;;
+            -h|--help)
+                cat <<USAGE
+Usage: ./setup.sh [--prepare-appimage]
+
+Without arguments the script installs FreeCAD (or the AppImage fallback) and
+creates a Python virtual environment for local helpers.
+
+  --prepare-appimage   Install minimal AppImage runtime dependencies and
+                       download/extract the cached FreeCAD AppImage. Intended
+                       for CI usage.
+USAGE
+                return 0
+                ;;
+        esac
+    fi
+
     freecadcmd_path=""
     if command -v freecadcmd >/dev/null 2>&1; then
         freecadcmd_path="$(command -v freecadcmd)"
