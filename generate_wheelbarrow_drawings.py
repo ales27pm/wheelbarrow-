@@ -20,7 +20,7 @@ import argparse
 import math
 import os
 import sys
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
 import FreeCAD as App
@@ -682,6 +682,17 @@ def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> N
             return False, f"{module_name}.export reported success but {path} missing"
         return True, None
 
+    def _attempt_draft_export(
+        objs: Sequence[App.DocumentObject], path: str, *, label: str
+    ) -> Tuple[bool, str | None]:
+        try:
+            Draft.export(objs, path)
+        except Exception as exc:  # pragma: no cover - env specific
+            return False, f"Draft.export failed for {label}: {exc}"
+        if not os.path.exists(path):
+            return False, f"Draft.export reported success but {path} missing"
+        return True, None
+
     def _attempt_import_export(
         objs: Sequence[App.DocumentObject], path: str, *, label: str
     ) -> Tuple[bool, str | None]:
@@ -705,29 +716,87 @@ def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> N
 
     errors: List[str] = []
 
-    success, warn_msg = _attempt_named_export(
-        "importDXF", objs, dxf_path, label=f"{out_path_base}.dxf"
-    )
-    if not success:
-        if warn_msg:
-            print(f"[WARN] {warn_msg}")
-        success, warn_msg = _attempt_import_export(
-            objs, dxf_path, label=f"{out_path_base}.dxf"
-        )
-        if not success and warn_msg:
-            errors.append(warn_msg)
+    def _run_export_chain(*attempts: Tuple[str, Callable[[], Tuple[bool, str | None]]]) -> None:
+        messages: List[str] = []
+        last_index = len(attempts) - 1
+        for idx, (attempt_name, runner) in enumerate(attempts):
+            success, warn_msg = runner()
+            if success:
+                return
+            if idx < last_index:
+                if warn_msg:
+                    print(f"[WARN] {warn_msg}")
+            else:
+                messages.append(
+                    warn_msg if warn_msg else f"{attempt_name} export failed without details"
+                )
+        if messages:
+            errors.extend(messages)
 
-    success, warn_msg = _attempt_named_export(
-        "importSVG", objs, svg_path, label=f"{out_path_base}.svg"
+    def _make_runner(func, *args, **kwargs) -> Callable[[], Tuple[bool, str | None]]:
+        return lambda: func(*args, **kwargs)
+
+    _run_export_chain(
+        (
+            "importDXF",
+            _make_runner(
+                _attempt_named_export,
+                "importDXF",
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
+        (
+            "Draft",
+            _make_runner(
+                _attempt_draft_export,
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
+        (
+            "Import",
+            _make_runner(
+                _attempt_import_export,
+                objs,
+                dxf_path,
+                label=f"{out_path_base}.dxf",
+            ),
+        ),
     )
-    if not success:
-        if warn_msg:
-            print(f"[WARN] {warn_msg}")
-        success, warn_msg = _attempt_import_export(
-            objs, svg_path, label=f"{out_path_base}.svg"
-        )
-        if not success and warn_msg:
-            errors.append(warn_msg)
+
+    _run_export_chain(
+        (
+            "importSVG",
+            _make_runner(
+                _attempt_named_export,
+                "importSVG",
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+        (
+            "Draft",
+            _make_runner(
+                _attempt_draft_export,
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+        (
+            "Import",
+            _make_runner(
+                _attempt_import_export,
+                objs,
+                svg_path,
+                label=f"{out_path_base}.svg",
+            ),
+        ),
+    )
 
     if errors:
         raise RuntimeError("; ".join(errors))
