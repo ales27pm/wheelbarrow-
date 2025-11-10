@@ -2,7 +2,10 @@ import os
 import math
 
 import FreeCAD as App
-import FreeCADGui as Gui  # noqa: F401  # Imported for macro compatibility
+try:
+    import FreeCADGui as Gui  # noqa: F401  # Imported for macro compatibility
+except Exception:  # pragma: no cover - freecadcmd lacks GUI module
+    Gui = None
 import Part
 import Draft
 
@@ -227,7 +230,8 @@ def make_wheelbarrow_assembly(shapes, params):
     )
 
     p_tray_bottom = App.Placement(
-        App.Vector(0, -115, rail_thk), App.Rotation(App.Vector(0, 0, 1), 0)
+        App.Vector(0, -(rail_w + tray_w / 2.0), rail_thk),
+        App.Rotation(App.Vector(0, 0, 1), 0),
     )
 
     rotation_side = App.Rotation(App.Vector(1, 0, 0), 90)
