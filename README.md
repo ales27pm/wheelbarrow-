@@ -11,7 +11,7 @@ This repository contains a FreeCAD macro that generates a fully parametric mini 
 
 1. Copy [`macros/MiniWheelbarrow.FCMacro`](macros/MiniWheelbarrow.FCMacro) into your FreeCAD macro directory or open it directly in the FreeCAD macro editor.
 2. Launch FreeCAD 0.20 or newer and run the macro.
-3. The macro creates/updates a document named `MiniWheelbarrow` and exports all drawings to `~/.FreeCAD/Wheelbarrow_Drawings` (or the platform equivalent of `App.getUserAppDataDir()`).
+3. The macro creates/updates a document named `MiniWheelbarrow` and exports all drawings to `App.getUserAppDataDir()/Wheelbarrow_Drawings` (e.g., `~/.local/share/FreeCAD/Wheelbarrow_Drawings` on Linux). Set the `WHEELBARROW_EXPORT_DIR` environment variable to override the export location.
 
 ### Headless execution (FreeCADCmd)
 
@@ -24,14 +24,14 @@ chmod +x FreeCAD.AppImage
 ./FreeCAD.AppImage --appimage-extract
 
 # Run the macro with the bundled FreeCADCmd binary
-./squashfs-root/usr/bin/freecadcmd macros/MiniWheelbarrow.FCMacro
+WHEELBARROW_EXPORT_DIR="$PWD/wheelbarrow-exports" ./squashfs-root/usr/bin/freecadcmd macros/MiniWheelbarrow.FCMacro
 ```
 
 DXF/SVG exports are produced in the directory printed at the end of the run. TechDraw PDFs are generated when the build provides `TechDraw` with PDF export support.
 
 ### Automated artifact builds
 
-Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs.
+Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs (both as individual files under `raw/` and as a single `wheelbarrow-fabrication.tar.gz` archive).
 
 ## Notes
 

@@ -9,6 +9,8 @@ on:
 jobs:
   generate-artifacts:
     runs-on: ubuntu-22.04
+    env:
+      WHEELBARROW_EXPORT_DIR: ${{ github.workspace }}/wheelbarrow_build/exports
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,19 +49,21 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
+          mkdir -p "${WHEELBARROW_EXPORT_DIR}"
           ./squashfs-root/usr/bin/freecadcmd macros/MiniWheelbarrow.FCMacro
 
       - name: Bundle fabrication outputs
         run: |
           set -euo pipefail
-          EXPORT_DIR="$HOME/.FreeCAD/Wheelbarrow_Drawings"
+          EXPORT_DIR="$WHEELBARROW_EXPORT_DIR"
           if [ ! -d "$EXPORT_DIR" ]; then
             echo "Expected export directory $EXPORT_DIR not found" >&2
-            ls -R "$HOME/.FreeCAD" || true
+            ls -R "$(dirname "$EXPORT_DIR")" || true
             exit 1
           fi
-          mkdir -p wheelbarrow-artifacts
-          rsync -a --delete "$EXPORT_DIR"/ wheelbarrow-artifacts/
+          mkdir -p wheelbarrow-artifacts/raw
+          rsync -a --delete "$EXPORT_DIR"/ wheelbarrow-artifacts/raw/
+          tar -czf wheelbarrow-artifacts/wheelbarrow-fabrication.tar.gz -C "$EXPORT_DIR" .
           ls -R wheelbarrow-artifacts
 
       - name: Upload artifacts

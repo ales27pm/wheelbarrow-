@@ -15,7 +15,12 @@ except Exception:  # pragma: no cover - TechDraw unavailable in headless setups
 
 
 DOC_NAME = "MiniWheelbarrow"
-EXPORT_DIR = os.path.join(App.getUserAppDataDir(), "Wheelbarrow_Drawings")
+
+EXPORT_DIR = os.environ.get("WHEELBARROW_EXPORT_DIR")
+if EXPORT_DIR:
+    EXPORT_DIR = os.path.abspath(os.path.expanduser(EXPORT_DIR))
+else:
+    EXPORT_DIR = os.path.join(App.getUserAppDataDir(), "Wheelbarrow_Drawings")
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 
