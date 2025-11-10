@@ -66,6 +66,8 @@ QT_QPA_PLATFORM=offscreen "$FREECAD_ROOT/usr/bin/python" generate_wheelbarrow_dr
 
 All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and PDF outputs to the directory specified by `--out`. By default the PDF comes from the TechDraw workbench (`--pdf-backend techdraw`); pass `--pdf-backend auto` or `--pdf-backend qt` to enable the Qt-based fallback when TechDraw is unavailable.
 
+Pass `--validate` to assert a handful of critical measurements (wheel diameter and rail length/widths) after generation—ideal for catching geometry drift when upgrading FreeCAD. Use `--pdf-per-part` to emit an additional PDF per part group and `--tile-a4` to split `all_parts.svg` into overlapping A4 tiles for household printing when large-format paper is unavailable.
+
 ### Automated artifact builds
 
 Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs (both as individual files under `raw/` and as a single `wheelbarrow-fabrication.tar.gz` archive).
