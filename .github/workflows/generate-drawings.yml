@@ -39,20 +39,20 @@ jobs:
           mkdir -p "${XDG_RUNTIME_DIR}"
           chmod 700 "${XDG_RUNTIME_DIR}"
 
-          python_bin="${FREECAD_PYTHON:-${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python}"
-          python_path_hint="${FREECAD_PYTHONPATH:-}"
-          if [ -z "${python_path_hint}" ]; then
-            for candidate in "${FREECAD_APPIMAGE_DIR}"/squashfs-root/usr/lib/python3.*; do
-              if [ -d "${candidate}" ]; then
-                python_path_hint="${candidate}/site-packages:${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib"
-                break
-              fi
-            done
-          fi
-          if [ -z "${python_path_hint}" ]; then
-            echo "Unable to determine FreeCAD AppImage Python site-packages path" >&2
+          source scripts/freecad_python_env.sh
+          if ! freecad_python_env; then
+            echo "Failed to resolve FreeCAD AppImage Python environment" >&2
             exit 1
           fi
+
+          python_bin="${FREECAD_PYTHON_BIN}"
+          python_path_hint="${FREECAD_PYTHONPATH_RESOLVED}"
+
+          if [ ! -x "${python_bin}" ]; then
+            echo "Resolved FreeCAD Python interpreter is not executable: ${python_bin}" >&2
+            exit 1
+          fi
+
           export PYTHONPATH="${python_path_hint}"
 
           "${python_bin}" \

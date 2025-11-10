@@ -38,6 +38,10 @@ try:  # TechDraw is optional (only required for PDF generation)
 except Exception:  # pragma: no cover - FreeCADCmd without TechDraw hits here
     TECHDRAW_AVAILABLE = False
 
+from wheelbarrow import export_prefs
+from wheelbarrow.geometry_validation import validate as validate_geometry
+from wheelbarrow.svg_tiling import tile_svg_to_a4
+
 DOC_NAME = "WheelbarrowDrawings"
 
 
@@ -1275,14 +1279,10 @@ def scaled_params(scale: float) -> Dict[str, float]:
 def _strip_freecad_sentinel(argv: Sequence[str]) -> List[str]:
     """Remove the leading ``--`` emitted by ``freecadcmd`` when passing script args."""
 
-    cleaned: List[str] = []
-    sentinel_removed = False
-    for token in argv:
-        if token == "--" and not sentinel_removed:
-            sentinel_removed = True
-            continue
-        cleaned.append(token)
-    return cleaned
+    args = list(argv)
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -1291,6 +1291,8 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.scale <= 0:
         raise ValueError("Scale must be positive.")
+
+    export_prefs.configure()
 
     ensure_dir(args.outdir)
 
@@ -1318,7 +1320,11 @@ def main(argv: List[str] | None = None) -> int:
     if args.tile_a4:
         svg_path = os.path.join(args.outdir, "all_parts.svg")
         if os.path.exists(svg_path):
-            tile_svg_to_a4(svg_path, os.path.join(args.outdir, "tiles_a4"))
+            tile_svg_to_a4(
+                svg_path,
+                os.path.join(args.outdir, "tiles_a4"),
+                PAPER_SIZES_MM["A4"],
+            )
         else:
             print(f"[WARN] Cannot tile SVG; {svg_path} not found.")
 
