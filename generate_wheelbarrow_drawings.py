@@ -38,10 +38,10 @@ DOC_NAME = "WheelbarrowDrawings"
 
 
 # -----------------------------
-# Paramètres géométriques (mm)
+# Geometric parameters (mm)
 # -----------------------------
 DEFAULT_PARAMS: Dict[str, float] = {
-    # Rails (poignées)
+    # Rails / handles
     "rail_length": 500,
     "rail_width_rear": 40,
     "rail_width_front": 25,
@@ -49,13 +49,13 @@ DEFAULT_PARAMS: Dict[str, float] = {
     "axle_from_front": 40,
     "axle_diameter": 6,
 
-    # Bac
+    # Box
     "box_inner_length": 260,
     "box_inner_width_rear": 150,
     "box_inner_width_front": 70,
     "box_inner_depth": 70,
 
-    # Entretoises / pieds / bloc d'axe
+    # Spreaders / legs / axle block
     "spreader_length": 120,
     "spreader_height": 30,
     "leg_height": 70,
@@ -63,18 +63,18 @@ DEFAULT_PARAMS: Dict[str, float] = {
     "block_length": 80,
     "block_width": 25,
 
-    # Roue
+    # Wheel
     "wheel_diameter": 120,
     "wheel_hole_diameter": 6,
 
-    # Matériaux (pour texte)
+    # Materials (for annotation text)
     "wood_thick_struct": 15,
     "wood_thick_panels": 10,
 }
 
 
 # ----------------------------------
-# Mise en page / export configuration
+# Page layout / export configuration
 # ----------------------------------
 PAPER_SIZES_MM = {
     "A4": (210.0, 297.0),
@@ -187,7 +187,7 @@ def arc_top_panel(
 
 
 # --------------------------------
-# Génération géométrie des pièces
+# Part geometry generation
 # --------------------------------
 def make_rails(
     doc: App.Document,
@@ -247,7 +247,7 @@ def make_rails(
 
     add_text(
         doc,
-        f"{label} — L={L}  w_rear={w0}  w_front={w1}  axe Ø{axle_d}",
+        f"{label} — L={L}  w_rear={w0}  w_front={w1}  axle Ø{axle_d}",
         (origin[0] + (L * 0.5), origin[1] + 8.0),
         size=4.0,
     )
@@ -316,7 +316,7 @@ def make_side_panel(
     )
     add_text(
         doc,
-        f"{label} — {L} × {H} (ép. panneaux {params['wood_thick_panels']})",
+        f"{label} — {L} × {H} (panel thickness {params['wood_thick_panels']})",
         (origin[0] + L / 2.0, origin[1] + H + 6.0),
         size=4.0,
     )
@@ -346,7 +346,7 @@ def make_front_panel(
     )
     add_text(
         doc,
-        f"{label} — {W} × {H} (sommet arrondi flèche {arc_height})",
+        f"{label} — {W} × {H} (curved top rise {arc_height})",
         (origin[0] + W / 2.0, origin[1] + H + 6.0),
         size=4.0,
     )
@@ -480,7 +480,7 @@ def make_wheel(
     add_diameter_dimension(doc, (cx, cy), dH / 2.0, (cx, cy - D / 2.0 - 10.0))
     add_text(
         doc,
-        f"{label} — Ø{D} (ép. {params['wood_thick_struct']})  moyeu Ø{dH}",
+        f"{label} — Ø{D} (thickness {params['wood_thick_struct']})  hub Ø{dH}",
         (cx, cy + D / 2.0 + 18.0),
         size=4.0,
     )
@@ -580,7 +580,7 @@ def make_pdf_page_from_objects(
     with_titleblock: bool = True,
 ) -> None:
     if not TECHDRAW_AVAILABLE:
-        print("[INFO] TechDraw non disponible : PDF non généré.")
+        print("[INFO] TechDraw not available: PDF not generated.")
         return
 
     page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
@@ -617,32 +617,32 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
             "with FreeCAD."
         )
     )
-    parser.add_argument("--out", dest="outdir", default="./out", help="Dossier de sortie")
+    parser.add_argument("--out", dest="outdir", default="./out", help="Output directory")
     parser.add_argument(
         "--paper",
         dest="paper",
         default="A4",
         choices=list(PAPER_SIZES_MM.keys()),
-        help="Taille papier pour PDF (TechDraw)",
+        help="Paper size for PDF output (TechDraw)",
     )
     parser.add_argument(
         "--scale",
         dest="scale",
         type=float,
         default=1.0,
-        help="Échelle globale (1.0 = 1:1). DXF/SVG sont 1:1; la page PDF est métrée.",
+        help="Global uniform scale (1.0 = full size). DXF/SVG remain 1:1; the PDF is scaled.",
     )
     parser.add_argument(
         "--title",
         dest="title",
         default="Mini Wheelbarrow — Full-Scale Drawings",
-        help="Titre page PDF",
+        help="Title for the PDF sheet",
     )
     parser.add_argument(
         "--no-titleblock",
         dest="no_titleblock",
         action="store_true",
-        help="Page PDF sans cartouche (dimensionnée au papier choisi)",
+        help="Generate the PDF without a title block (exact paper size)",
     )
     return parser.parse_args(argv)
 
