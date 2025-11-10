@@ -997,6 +997,51 @@ def make_pdf_page_from_objects(
 
             return hasattr(target, property_name)
 
+        def _set_view_orientation(target: App.DocumentObject) -> Tuple[bool, List[str]]:
+            """Attempt to apply TechDraw orientation vectors.
+
+            Returns a tuple of ``(success, missing_properties)`` so callers can
+            emit a single warning when FreeCAD omits the expected attributes.
+            ``missing_properties`` is empty when ``success`` is ``True``.
+            """
+
+            orientation_vectors: Tuple[Tuple[str, App.Vector], ...] = (
+                ("XDirection", App.Vector(1, 0, 0)),
+                ("YDirection", App.Vector(0, 1, 0)),
+            )
+
+            missing: List[str] = [
+                name
+                for name, _ in orientation_vectors
+                if not _supports_property(target, name)
+            ]
+            if missing:
+                return False, missing
+
+            try:
+                for name, vector in orientation_vectors:
+                    setattr(target, name, vector)
+            except AttributeError:
+                return False, [name]
+
+            return True, []
+
+        def _supports_property(target: App.DocumentObject, property_name: str) -> bool:
+            """Return ``True`` when ``target`` exposes ``property_name``."""
+
+            has_prop = getattr(target, "hasProperty", None)
+            if callable(has_prop):
+                try:
+                    if has_prop(property_name):
+                        return True
+                except Exception:
+                    # ``hasProperty`` is not guaranteed to exist or accept the
+                    # queried attribute on every FreeCAD build. Fall back to
+                    # duck-typing if it misbehaves.
+                    pass
+
+            return hasattr(target, property_name)
+
         def _set_view_orientation(
             target: App.DocumentObject,
         ) -> Tuple[bool, List[str], List[str]]:
@@ -1072,8 +1117,22 @@ def make_pdf_page_from_objects(
                     )
                 orientation_warning_emitted = True
 
-            view.ScaleType = "Custom"
-            view.Scale = 1.0
+                orientation_set, missing_props = _set_view_orientation(view)
+                if not orientation_set and not orientation_warning_emitted:
+                    if missing_props:
+                        missing_desc = ", ".join(sorted(missing_props))
+                        print(
+                            "[WARN] TechDraw view missing orientation properties "
+                            f"({missing_desc}); using FreeCAD defaults."
+                        )
+                    else:
+                        print(
+                            "[WARN] TechDraw view could not apply orientation; using FreeCAD defaults."
+                        )
+                    orientation_warning_emitted = True
+
+                view.ScaleType = "Custom"
+                view.Scale = 1.0
 
             page.addView(view)
             created_views.append(view)
