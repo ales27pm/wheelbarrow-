@@ -25,6 +25,8 @@ import os
 import sys
 import tempfile
 import time
+import contextlib
+import re
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
@@ -894,6 +896,8 @@ def make_pdf_page_from_objects(
     scale_hint: float = 1.0,
     pdf_backend: str = "techdraw",
 ) -> None:
+    objects = list(objects)
+
     def _blank_template_svg(width_mm: float, height_mm: float) -> str:
         return (
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -989,19 +993,108 @@ def make_pdf_page_from_objects(
 
         return TechDrawGui.exportPageAsPdf
 
+    def _make_doc_name(prefix: str) -> str:
+        token = re.sub(r"[^0-9A-Za-z_]+", "_", prefix).strip("_") or "TechDraw"
+        if token[0].isdigit():
+            token = f"_{token}"
+        base = token
+        index = 1
+        while doc.getObject(token) is not None:
+            token = f"{base}_{index}"
+            index += 1
+        return token
+
     def _techdraw_pdf() -> None:
-        page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
         w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
-        template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
+
+        page_name = _make_doc_name(f"{title}_Page")
+        template_name = _make_doc_name(f"{title}_Template")
+        view_name = _make_doc_name(f"{title}_DraftView")
+
+        page = doc.addObject("TechDraw::DrawPage", page_name)
+        template = doc.addObject("TechDraw::DrawSVGTemplate", template_name)
+        view = doc.addObject("TechDraw::DrawViewDraft", view_name)
+
         template.Template = _resolve_template_path(w, h)
         page.Template = template
 
-        for i, obj in enumerate(objects):
-            view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
-            view.Source = [obj]
+        view.Source = objects
+        view.XDirection = App.Vector(1, 0, 0)
+        view.YDirection = App.Vector(0, 1, 0)
+        view.ScaleType = "Custom"
+        view.Scale = 1.0
+
+        try:
             page.addView(view)
 
-        recompute(doc)
+            recompute(doc)
+
+            if out_pdf_path:
+                abs_pdf_path = os.path.abspath(out_pdf_path)
+                if os.path.exists(abs_pdf_path):
+                    try:
+                        os.remove(abs_pdf_path)
+                    except OSError as exc:
+                        raise RuntimeError(
+                            f"Unable to remove existing PDF before TechDraw export: {exc}"
+                        ) from exc
+
+                App.setActiveDocument(doc.Name)
+                App.ActiveDocument = doc
+
+                with contextlib.suppress(Exception):
+                    import FreeCADGui
+
+                    gui_doc = FreeCADGui.getDocument(doc.Name)
+                    FreeCADGui.setActiveDocument(doc.Name)
+                    FreeCADGui.ActiveDocument = gui_doc
+                    FreeCADGui.activateWorkbench("TechDrawWorkbench")
+
+                last_exc: Exception | None = None
+
+                if hasattr(TechDraw, "exportPageAsPdf"):
+                    try:
+                        TechDraw.exportPageAsPdf(page, abs_pdf_path)
+                    except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                        last_exc = exc
+                    else:
+                        last_exc = None
+
+                if last_exc is not None or not os.path.exists(abs_pdf_path):
+                    exporter = _ensure_techdraw_gui()
+                    try:
+                        exporter(page, abs_pdf_path)
+                        last_exc = None
+                    except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                        last_exc = exc
+
+                if last_exc is not None:
+                    raise RuntimeError(f"TechDraw export failed: {last_exc}")
+
+                deadline = time.time() + 10.0
+                while time.time() < deadline:
+                    if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
+                        break
+                    if TECHDRAW_QT_APP is not None:
+                        TECHDRAW_QT_APP.processEvents()
+                    time.sleep(0.1)
+
+                if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
+                    raise RuntimeError(
+                        f"TechDraw export did not produce a PDF at {abs_pdf_path}."
+                    )
+        finally:
+            # Remove temporary TechDraw artefacts so repeated runs keep the
+            # document tidy and avoid name collisions.
+            with contextlib.suppress(Exception):
+                if doc.getObject(view.Name) is not None:
+                    doc.removeObject(view.Name)
+            with contextlib.suppress(Exception):
+                if doc.getObject(template.Name) is not None:
+                    doc.removeObject(template.Name)
+            with contextlib.suppress(Exception):
+                if doc.getObject(page.Name) is not None:
+                    doc.removeObject(page.Name)
 
         if out_pdf_path:
             abs_pdf_path = os.path.abspath(out_pdf_path)
