@@ -28,13 +28,15 @@ jobs:
       - name: Generate 2D drawing exports
         env:
           QT_QPA_PLATFORM: offscreen
-          FREECADPATH: ${{ env.FREECAD_APPIMAGE_DIR }}/squashfs-root/usr/lib/freecad/lib
         run: |
           set -euo pipefail
           mkdir -p "${DRAWING_OUTPUT_DIR}"
+          export FREECADPATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib/freecad/lib"
+          export LD_LIBRARY_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
+          export FREECAD_USER_HOME="${GITHUB_WORKSPACE}/wheelbarrow_build/freecad_user"
+          mkdir -p "${FREECAD_USER_HOME}"
           "${FREECADCMD_PATH}" \
-            generate_wheelbarrow_drawings.py \
-            -- \
+            --run "${GITHUB_WORKSPACE}/generate_wheelbarrow_drawings.py" \
             --out "${DRAWING_OUTPUT_DIR}" \
             --paper Tabloid \
             --scale 1.0 \
