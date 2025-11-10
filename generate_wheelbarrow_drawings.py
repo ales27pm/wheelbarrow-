@@ -19,6 +19,7 @@ files remain non-overlapping at any size.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import os
 import sys
@@ -1004,15 +1005,55 @@ def make_pdf_page_from_objects(
 
         if out_pdf_path:
             abs_pdf_path = os.path.abspath(out_pdf_path)
-            exporter = _ensure_techdraw_gui()
-            exporter(page, abs_pdf_path)
-            if TECHDRAW_QT_APP is not None:
-                TECHDRAW_QT_APP.processEvents()
-            if not os.path.exists(abs_pdf_path):
-                time.sleep(0.2)
+            if os.path.exists(abs_pdf_path):
+                try:
+                    os.remove(abs_pdf_path)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Unable to remove existing PDF before TechDraw export: {exc}"
+                    ) from exc
+
+            App.setActiveDocument(doc.Name)
+            App.ActiveDocument = doc
+
+            with contextlib.suppress(Exception):
+                import FreeCADGui
+
+                gui_doc = FreeCADGui.getDocument(doc.Name)
+                FreeCADGui.setActiveDocument(doc.Name)
+                FreeCADGui.ActiveDocument = gui_doc
+                FreeCADGui.activateWorkbench("TechDrawWorkbench")
+
+            last_exc: Exception | None = None
+
+            if hasattr(TechDraw, "exportPageAsPdf"):
+                try:
+                    TechDraw.exportPageAsPdf(page, abs_pdf_path)
+                except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                    last_exc = exc
+                else:
+                    last_exc = None
+
+            if last_exc is not None or not os.path.exists(abs_pdf_path):
+                exporter = _ensure_techdraw_gui()
+                try:
+                    exporter(page, abs_pdf_path)
+                    last_exc = None
+                except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                    last_exc = exc
+
+            if last_exc is not None:
+                raise RuntimeError(f"TechDraw export failed: {last_exc}")
+
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
+                    break
                 if TECHDRAW_QT_APP is not None:
                     TECHDRAW_QT_APP.processEvents()
-            if not os.path.exists(abs_pdf_path):
+                time.sleep(0.1)
+
+            if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
                 raise RuntimeError(
                     f"TechDraw export did not produce a PDF at {abs_pdf_path}."
                 )
