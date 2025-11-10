@@ -23,7 +23,6 @@ import math
 import os
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
@@ -38,28 +37,11 @@ try:  # TechDraw is optional (only required for PDF generation)
 except Exception:  # pragma: no cover - FreeCADCmd without TechDraw hits here
     TECHDRAW_AVAILABLE = False
 
+from wheelbarrow import export_prefs
+from wheelbarrow.geometry_validation import validate as validate_geometry
+from wheelbarrow.svg_tiling import tile_svg_to_a4
+
 DOC_NAME = "WheelbarrowDrawings"
-
-
-# ---- Stable export preferences for CI/desktop consistency ----
-def _configure_export_prefs() -> None:
-    """Force known-good DXF/SVG/unit preferences for deterministic exports."""
-
-    # Units in millimetres
-    App.ParamGet("User parameter:BaseApp/Preferences/Units").SetInt("UserSchema", 0)
-
-    pref = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Import")
-    pref.SetBool("UseLegacyDXFImporter", False)
-    pref.SetBool("UseLegacyDXFExporter", False)
-    pref.SetBool("ExportSplines", True)
-    pref.SetBool("DXFUseScaling", False)
-    pref.SetString("DXFTextStyle", "STANDARD")
-    pref.SetInt("DXFDecimalPlaces", 3)
-    pref.SetFloat("SvgStrokeWidth", 0.2)
-    pref.SetBool("SvgExportTextAsPaths", False)
-
-
-_configure_export_prefs()
 
 
 # -----------------------------
@@ -1123,81 +1105,6 @@ def make_pdf_page_from_objects(
 
 
 # -----------------------------
-# Validation & tiling helpers
-# -----------------------------
-def _assert_close(name: str, got: float, want: float, tol: float = 0.5) -> None:
-    """Raise ``AssertionError`` when a measured value deviates too much."""
-
-    if abs(got - want) > tol:
-        raise AssertionError(f"[VALIDATE] {name}: got {got:.3f} mm, expected {want:.3f} ±{tol} mm")
-
-
-def validate_geometry(doc: App.Document, params: Dict[str, float]) -> None:
-    """Check a few critical dimensions to catch exporter/regression drift."""
-
-    outer = [o for o in doc.Objects if o.Label.startswith("WHEEL_OUTER")]
-    if outer and hasattr(outer[0], "Radius"):
-        _assert_close("Wheel diameter", 2.0 * outer[0].Radius, params["wheel_diameter"])
-
-    rails = [
-        o
-        for o in doc.Objects
-        if o.Label.startswith("RAIL_LEFT_PROFILE") or o.Label.startswith("RAIL_RIGHT_PROFILE")
-    ]
-    if rails:
-        rail = rails[0]
-        shape = getattr(rail, "Shape", None)
-        if shape is not None and not shape.isNull():
-            bbox = shape.BoundBox
-            _assert_close("Rail length", bbox.XLength, params["rail_length"], tol=0.8)
-            if not (
-                params["rail_width_front"] <= bbox.YLength <= params["rail_width_rear"] + 1.0
-            ):
-                raise AssertionError(
-                    f"[VALIDATE] Rail bbox.YLength={bbox.YLength:.2f} mm unexpected range"
-                )
-
-
-def tile_svg_to_a4(svg_in: str, out_dir: str, *, overlap_mm: float = 6.0) -> None:
-    """Split an SVG into overlapping A4 tiles for household printing."""
-
-    ensure_dir(out_dir)
-
-    tree = ET.parse(svg_in)
-    root = tree.getroot()
-
-    view_box = root.get("viewBox")
-    if view_box:
-        vx, vy, vw, vh = map(float, view_box.split())
-    else:
-        width_attr = root.get("width", "0mm").replace("mm", "")
-        height_attr = root.get("height", "0mm").replace("mm", "")
-        vx, vy, vw, vh = 0.0, 0.0, float(width_attr or 0.0), float(height_attr or 0.0)
-
-    a4w, a4h = PAPER_SIZES_MM["A4"]
-    step_x = a4w - overlap_mm
-    step_y = a4h - overlap_mm
-
-    cols = max(1, int(math.ceil((vw + overlap_mm) / step_x)))
-    rows = max(1, int(math.ceil((vh + overlap_mm) / step_y)))
-
-    for row in range(rows):
-        for col in range(cols):
-            x0 = vx + col * step_x
-            y0 = vy + row * step_y
-
-            tile_root = ET.fromstring(ET.tostring(root))
-            tile_root.set("width", f"{a4w:.3f}mm")
-            tile_root.set("height", f"{a4h:.3f}mm")
-            tile_root.set("viewBox", f"{x0:.3f} {y0:.3f} {a4w:.3f} {a4h:.3f}")
-
-            out_path = os.path.join(out_dir, f"tile_r{row + 1}_c{col + 1}.svg")
-            ET.ElementTree(tile_root).write(out_path, encoding="utf-8", xml_declaration=True)
-
-    print(f"[OK] Tiled into {rows}×{cols} A4 SVG pages at: {out_dir}")
-
-
-# -----------------------------
 # Argument parsing & scaling
 # -----------------------------
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -1275,14 +1182,10 @@ def scaled_params(scale: float) -> Dict[str, float]:
 def _strip_freecad_sentinel(argv: Sequence[str]) -> List[str]:
     """Remove the leading ``--`` emitted by ``freecadcmd`` when passing script args."""
 
-    cleaned: List[str] = []
-    sentinel_removed = False
-    for token in argv:
-        if token == "--" and not sentinel_removed:
-            sentinel_removed = True
-            continue
-        cleaned.append(token)
-    return cleaned
+    args = list(argv)
+    if args and args[0] == "--":
+        return args[1:]
+    return args
 
 
 def main(argv: List[str] | None = None) -> int:
@@ -1291,6 +1194,8 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.scale <= 0:
         raise ValueError("Scale must be positive.")
+
+    export_prefs.configure()
 
     ensure_dir(args.outdir)
 
@@ -1318,7 +1223,11 @@ def main(argv: List[str] | None = None) -> int:
     if args.tile_a4:
         svg_path = os.path.join(args.outdir, "all_parts.svg")
         if os.path.exists(svg_path):
-            tile_svg_to_a4(svg_path, os.path.join(args.outdir, "tiles_a4"))
+            tile_svg_to_a4(
+                svg_path,
+                os.path.join(args.outdir, "tiles_a4"),
+                PAPER_SIZES_MM["A4"],
+            )
         else:
             print(f"[WARN] Cannot tile SVG; {svg_path} not found.")
 

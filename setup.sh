@@ -67,6 +67,12 @@ install_with_brew() {
     brew install python@3.12
 }
 
+install_python_helpers() {
+    info "Installing shared Python helpers (defusedxml)"
+    python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+    python3 -m pip install --upgrade --target "${REPO_DIR}/third_party" defusedxml
+}
+
 install_appimage_runtime_deps() {
     if command -v apt-get >/dev/null 2>&1; then
         info "Installing FreeCAD AppImage runtime dependencies with apt-get"
@@ -121,6 +127,7 @@ main() {
             --prepare-appimage)
                 install_appimage_runtime_deps
                 prepare_appimage
+                install_python_helpers
                 if [[ -n "${GITHUB_ENV:-}" ]]; then
                     {
                         echo "FREECAD_APPIMAGE_DIR=${FREECAD_APPIMAGE_DIR}"
@@ -200,6 +207,8 @@ USAGE
         error "python3 is required but could not be installed automatically."
     fi
 
+    install_python_helpers
+
     info "Creating Python virtual environment for FreeCAD helpers"
     python3 -m venv "${REPO_DIR}/.venv"
     "${REPO_DIR}/.venv/bin/pip" install --upgrade pip wheel
@@ -213,15 +222,20 @@ If FreeCADCmd is on PATH (${freecadcmd_path:-unavailable}), activate the helper 
   source "${REPO_DIR}/.venv/bin/activate"
   freecadcmd --console --python "${REPO_DIR}/generate_wheelbarrow_drawings.py" -- --out ./plans
 
+  (The ``--`` sentinel is required when invoking via FreeCADCmd so script arguments
+  pass through correctly. It should be omitted when calling the script with Python
+  directly.)
+
 For the AppImage fallback, ensure the environment variables are set before running:
 
   source "${REPO_DIR}/.venv/bin/activate"
   export FREECAD_APPIMAGE_DIR="${FREECAD_APPIMAGE_DIR}"
   export FREECADPATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib/freecad/lib"
   export LD_LIBRARY_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
-  PYTHON_SITE_DIR=$(ls -d "${FREECAD_APPIMAGE_DIR}"/squashfs-root/usr/lib/python3.* | head -n 1)
-  export PYTHONPATH="${PYTHON_SITE_DIR}/site-packages:${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib"
-  "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+  source "${REPO_DIR}/scripts/freecad_python_env.sh"
+  freecad_python_env
+  export PYTHONPATH="${FREECAD_PYTHONPATH_RESOLVED}"
+  "${FREECAD_PYTHON_BIN}" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
 
 SETUP_NOTE
 }
