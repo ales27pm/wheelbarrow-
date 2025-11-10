@@ -646,16 +646,62 @@ def layout_parts(doc: App.Document, params: Dict[str, float], *, scale: float = 
 # Export helpers
 # -----------------------------
 def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> None:
+    """Export the provided Draft objects to DXF and SVG files.
+
+    ``Import.export`` works for many formats but FreeCAD's AppImage builds ship the
+    dedicated ``importDXF``/``importSVG`` modules that offer better reliability for
+    2D outputs.  Falling back to ``Import.export`` keeps compatibility with older
+    installs while still surfacing any failure as a hard error so CI can flag it
+    immediately instead of silently producing empty artifact directories.
+    """
+
+    objs = list(objects)
+    if not objs:
+        raise ValueError(f"No objects provided for export to {out_path_base}")
+
     dxf_path = f"{out_path_base}.dxf"
     svg_path = f"{out_path_base}.svg"
+
+    errors: List[str] = []
+
+    # --- DXF ---
     try:
-        Import.export(list(objects), dxf_path)
+        import importDXF  # type: ignore[import-not-found]
+
+        importDXF.export(objs, dxf_path)
     except Exception as exc:  # pragma: no cover - depends on FreeCAD environment
-        print(f"[WARN] DXF export failed for {out_path_base}: {exc}")
+        try:
+            Import.export(objs, dxf_path)
+        except Exception as fallback_exc:  # pragma: no cover - env specific
+            errors.append(f"DXF export failed for {out_path_base}: {fallback_exc}")
+            print(f"[WARN] DXF export failed for {out_path_base}: {fallback_exc}")
+        else:
+            print(
+                "[WARN] importDXF unavailable; exported DXF via Import.export()."
+            )
+    if not os.path.exists(dxf_path):
+        errors.append(f"DXF export did not create {dxf_path}")
+
+    # --- SVG ---
     try:
-        Import.export(list(objects), svg_path)
+        import importSVG  # type: ignore[import-not-found]
+
+        importSVG.export(objs, svg_path)
     except Exception as exc:  # pragma: no cover - depends on FreeCAD environment
-        print(f"[WARN] SVG export failed for {out_path_base}: {exc}")
+        try:
+            Import.export(objs, svg_path)
+        except Exception as fallback_exc:  # pragma: no cover - env specific
+            errors.append(f"SVG export failed for {out_path_base}: {fallback_exc}")
+            print(f"[WARN] SVG export failed for {out_path_base}: {fallback_exc}")
+        else:
+            print(
+                "[WARN] importSVG unavailable; exported SVG via Import.export()."
+            )
+    if not os.path.exists(svg_path):
+        errors.append(f"SVG export did not create {svg_path}")
+
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 
 def make_pdf_page_from_objects(
