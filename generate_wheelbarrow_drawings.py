@@ -997,40 +997,34 @@ def make_pdf_page_from_objects(
 
             return hasattr(target, property_name)
 
-        def _set_view_orientation(
-            target: App.DocumentObject,
-        ) -> Tuple[bool, List[str], List[str]]:
+        def _set_view_orientation(target: App.DocumentObject) -> Tuple[bool, List[str]]:
             """Attempt to apply TechDraw orientation vectors.
 
-            The return value contains ``(success, missing_required, missing_optional)``.
-            ``success`` is ``True`` when at least the required orientation properties
-            were assigned successfully. Missing properties are reported separately so
-            callers can surface a single descriptive warning message.
+            Returns a tuple of ``(success, missing_properties)`` so callers can
+            emit a single warning when FreeCAD omits the expected attributes.
+            ``missing_properties`` is empty when ``success`` is ``True``.
             """
 
-            orientation_specs: Tuple[Tuple[str, App.Vector, bool], ...] = (
-                ("Direction", App.Vector(0, 0, 1), True),
-                ("XDirection", App.Vector(1, 0, 0), False),
-                ("YDirection", App.Vector(0, 1, 0), False),
+            orientation_vectors: Tuple[Tuple[str, App.Vector], ...] = (
+                ("XDirection", App.Vector(1, 0, 0)),
+                ("YDirection", App.Vector(0, 1, 0)),
             )
 
-            missing_required: List[str] = []
-            missing_optional: List[str] = []
-            applied_any = False
+            missing: List[str] = [
+                name
+                for name, _ in orientation_vectors
+                if not _supports_property(target, name)
+            ]
+            if missing:
+                return False, missing
 
-            for name, vector, required in orientation_specs:
-                if not _supports_property(target, name):
-                    (missing_required if required else missing_optional).append(name)
-                    continue
-
-                try:
+            try:
+                for name, vector in orientation_vectors:
                     setattr(target, name, vector)
-                    applied_any = True
-                except Exception:
-                    (missing_required if required else missing_optional).append(name)
+            except AttributeError:
+                return False, [name]
 
-            success = applied_any and not missing_required
-            return success, missing_required, missing_optional
+            return True, []
 
         try:
             for index, obj in enumerate(objects, start=1):
@@ -1058,20 +1052,17 @@ def make_pdf_page_from_objects(
                         f"Unable to attach object '{obj.Label}' to TechDraw view"
                     ) from exc
 
-                _, missing_required, missing_optional = _set_view_orientation(view)
-                if (missing_required or missing_optional) and not orientation_warning_emitted:
-                    missing_desc = ", ".join(
-                        sorted(missing_required + missing_optional)
-                    )
-                    if missing_required:
+                orientation_set, missing_props = _set_view_orientation(view)
+                if not orientation_set and not orientation_warning_emitted:
+                    if missing_props:
+                        missing_desc = ", ".join(sorted(missing_props))
                         print(
-                            "[WARN] TechDraw view missing required orientation properties "
+                            "[WARN] TechDraw view missing orientation properties "
                             f"({missing_desc}); using FreeCAD defaults."
                         )
                     else:
                         print(
-                            "[WARN] TechDraw view missing optional orientation properties "
-                            f"({missing_desc}); continuing with available orientation."
+                            "[WARN] TechDraw view could not apply orientation; using FreeCAD defaults."
                         )
                     orientation_warning_emitted = True
 
