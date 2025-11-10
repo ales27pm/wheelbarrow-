@@ -1013,19 +1013,48 @@ def make_pdf_page_from_objects(
 
         page = doc.addObject("TechDraw::DrawPage", page_name)
         template = doc.addObject("TechDraw::DrawSVGTemplate", template_name)
-        view = doc.addObject("TechDraw::DrawViewDraft", view_name)
 
         template.Template = _resolve_template_path(w, h)
         page.Template = template
 
-        view.Source = objects
-        view.XDirection = App.Vector(1, 0, 0)
-        view.YDirection = App.Vector(0, 1, 0)
-        view.ScaleType = "Custom"
-        view.Scale = 1.0
+        created_views: List[App.DocumentObject] = []
 
         try:
-            page.addView(view)
+            for index, obj in enumerate(objects, start=1):
+                candidate_name = _make_doc_name(f"{title}_DraftView_{index}")
+
+                view_type = "TechDraw::DrawViewDraft"
+                shape = getattr(obj, "Shape", None)
+                if shape is not None and not getattr(shape, "isNull", lambda: True)():
+                    view_type = "TechDraw::DrawViewPart"
+
+                view = doc.addObject(view_type, candidate_name)
+
+                try:
+                    if view_type == "TechDraw::DrawViewPart":
+                        # DrawViewPart expects a sequence of sources; fall back to a
+                        # single link assignment if the FreeCAD build rejects lists.
+                        try:
+                            view.Source = [obj]
+                        except TypeError:
+                            view.Source = obj
+                    else:
+                        view.Source = obj
+                except TypeError as exc:
+                    raise RuntimeError(
+                        f"Unable to attach object '{obj.Label}' to TechDraw view"
+                    ) from exc
+
+                view.XDirection = App.Vector(1, 0, 0)
+                view.YDirection = App.Vector(0, 1, 0)
+                view.ScaleType = "Custom"
+                view.Scale = 1.0
+
+                page.addView(view)
+                created_views.append(view)
+
+            if not created_views:
+                raise RuntimeError("No TechDraw views were created for PDF export.")
 
             recompute(doc)
 
@@ -1086,9 +1115,10 @@ def make_pdf_page_from_objects(
         finally:
             # Remove temporary TechDraw artefacts so repeated runs keep the
             # document tidy and avoid name collisions.
-            with contextlib.suppress(Exception):
-                if doc.getObject(view.Name) is not None:
-                    doc.removeObject(view.Name)
+            for view in created_views:
+                with contextlib.suppress(Exception):
+                    if doc.getObject(view.Name) is not None:
+                        doc.removeObject(view.Name)
             with contextlib.suppress(Exception):
                 if doc.getObject(template.Name) is not None:
                     doc.removeObject(template.Name)
