@@ -1096,6 +1096,7 @@ def make_pdf_page_from_objects(
                 if doc.getObject(page.Name) is not None:
                     doc.removeObject(page.Name)
 
+        recompute(doc)
         if out_pdf_path:
             abs_pdf_path = os.path.abspath(out_pdf_path)
             if os.path.exists(abs_pdf_path):
