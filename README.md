@@ -9,6 +9,22 @@ This repository contains a FreeCAD macro that generates a fully parametric mini 
 
 ## Getting Started
 
+### Install dependencies
+
+Run the repository setup script to install FreeCAD (via your package manager when possible) and bootstrap a local Python environment for the helper scripts:
+
+```bash
+./setup.sh
+```
+
+The script will:
+
+- Install FreeCAD using `apt`, `dnf`, `pacman`, or Homebrew when available, or download the official 1.0.2 AppImage as a fallback on Linux/unsupported systems.
+- Ensure Python 3, `pip`, and `venv` are available and create a virtual environment under `.venv/`.
+- Print usage instructions describing how to run the drawing generator with either the system `freecadcmd` binary or the AppImage fallback.
+
+### Use the parametric macro
+
 1. Copy [`macros/MiniWheelbarrow.FCMacro`](macros/MiniWheelbarrow.FCMacro) into your FreeCAD macro directory or open it directly in the FreeCAD macro editor.
 2. Launch FreeCAD 0.20 or newer and run the macro.
 3. The macro creates/updates a document named `MiniWheelbarrow` and exports all drawings to `App.getUserAppDataDir()/Wheelbarrow_Drawings` (e.g., `~/.local/share/FreeCAD/Wheelbarrow_Drawings` on Linux). Set the `WHEELBARROW_EXPORT_DIR` environment variable to override the export location.
@@ -29,9 +45,22 @@ WHEELBARROW_EXPORT_DIR="$PWD/wheelbarrow-exports" ./squashfs-root/usr/bin/freeca
 
 DXF/SVG exports are produced in the directory printed at the end of the run. TechDraw PDFs are generated when the build provides `TechDraw` with PDF export support.
 
+### Standalone drawing generator
+
+For CI/CD pipelines or lightweight automation that only needs the 2D fabrication drawings (without instantiating the full parametric model) use the `generate_wheelbarrow_drawings.py` helper:
+
+```bash
+./squashfs-root/usr/bin/freecadcmd generate_wheelbarrow_drawings.py \
+  --out ./plans --paper Tabloid --scale 1.0 --no-titleblock
+```
+
+All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and—when TechDraw is available—PDF outputs to the directory specified by `--out`.
+
 ### Automated artifact builds
 
 Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs (both as individual files under `raw/` and as a single `wheelbarrow-fabrication.tar.gz` archive).
+
+For lightweight automation focused solely on the 2D fabrication drawings, the **Generate wheelbarrow drawing plans** workflow executes `generate_wheelbarrow_drawings.py` with the same FreeCAD AppImage. It emits the DXF, SVG, and PDF (when TechDraw is available) deliverables to an artifact named `wheelbarrow-drawing-plans`, mirroring the CLI example above so you can fetch ready-to-print templates without building the full parametric model.
 
 ## Notes
 

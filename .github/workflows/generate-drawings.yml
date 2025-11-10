@@ -1,0 +1,63 @@
+name: Generate wheelbarrow drawing plans
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  generate-drawings:
+    runs-on: ubuntu-22.04
+    env:
+      DRAWING_OUTPUT_DIR: ${{ github.workspace }}/wheelbarrow_build/drawings
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache FreeCAD AppImage payload
+        id: cache-freecad
+        uses: actions/cache@v4
+        with:
+          path: .freecad/appimage-1.0.2
+          key: ${{ runner.os }}-freecad-1.0.2
+
+      - name: Prepare FreeCAD AppImage
+        run: ./setup.sh --prepare-appimage
+
+      - name: Generate 2D drawing exports
+        env:
+          QT_QPA_PLATFORM: offscreen
+          FREECADPATH: ${{ env.FREECAD_APPIMAGE_DIR }}/squashfs-root/usr/lib/freecad/lib
+        run: |
+          set -euo pipefail
+          mkdir -p "${DRAWING_OUTPUT_DIR}"
+          "${FREECADCMD_PATH}" \
+            generate_wheelbarrow_drawings.py \
+            -- \
+            --out "${DRAWING_OUTPUT_DIR}" \
+            --paper Tabloid \
+            --scale 1.0 \
+            --no-titleblock
+
+      - name: Inspect generated drawings
+        run: |
+          set -euo pipefail
+          ls -R "${DRAWING_OUTPUT_DIR}"
+          test -f "${DRAWING_OUTPUT_DIR}/all_parts.dxf"
+          test -f "${DRAWING_OUTPUT_DIR}/all_parts.svg"
+
+      - name: Bundle drawing outputs
+        run: |
+          set -euo pipefail
+          mkdir -p wheelbarrow-drawings/raw
+          rsync -a --delete "${DRAWING_OUTPUT_DIR}/" wheelbarrow-drawings/raw/
+          tar -czf wheelbarrow-drawings/wheelbarrow-drawings.tar.gz -C "${DRAWING_OUTPUT_DIR}" .
+          ls -R wheelbarrow-drawings
+
+      - name: Upload drawing artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheelbarrow-drawing-plans
+          path: wheelbarrow-drawings
+          if-no-files-found: error
