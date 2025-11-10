@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+FREECAD_APPIMAGE_VERSION="1.0.2"
+FREECAD_CACHE_DIR="${REPO_DIR}/.freecad"
+FREECAD_APPIMAGE_DIR="${FREECAD_CACHE_DIR}/appimage-${FREECAD_APPIMAGE_VERSION}"
+FREECAD_APPIMAGE_PATH="${FREECAD_APPIMAGE_DIR}/FreeCAD_${FREECAD_APPIMAGE_VERSION}.AppImage"
+FREECAD_APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_APPIMAGE_VERSION}/FreeCAD_${FREECAD_APPIMAGE_VERSION}-conda-Linux-x86_64-py311.AppImage"
+
+info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
+error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"; exit 1; }
+
+need_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        error "Required command '$1' not found. Install it manually and re-run."
+    fi
+}
+
+install_with_apt() {
+    info "Installing FreeCAD and Python runtime with apt-get"
+    need_cmd sudo
+    sudo apt-get update
+    sudo apt-get install -y freecad freecad-common python3 python3-venv python3-pip
+}
+
+install_with_dnf() {
+    info "Installing FreeCAD and Python runtime with dnf"
+    need_cmd sudo
+    sudo dnf install -y freecad python3 python3-pip
+}
+
+install_with_pacman() {
+    info "Installing FreeCAD and Python runtime with pacman"
+    need_cmd sudo
+    sudo pacman -Sy --noconfirm freecad python python-pip
+}
+
+install_with_brew() {
+    info "Installing FreeCAD and Python runtime with Homebrew"
+    need_cmd brew
+    brew update
+    brew install --cask freecad
+    brew install python@3.12
+}
+
+prepare_appimage() {
+    need_cmd curl
+    need_cmd chmod
+    mkdir -p "${FREECAD_APPIMAGE_DIR}"
+    if [ ! -f "${FREECAD_APPIMAGE_PATH}" ]; then
+        info "Downloading FreeCAD AppImage ${FREECAD_APPIMAGE_VERSION}"
+        curl -L "${FREECAD_APPIMAGE_URL}" -o "${FREECAD_APPIMAGE_PATH}"
+        chmod +x "${FREECAD_APPIMAGE_PATH}"
+    else
+        info "Reusing cached FreeCAD AppImage at ${FREECAD_APPIMAGE_PATH}"
+    fi
+
+    if [ ! -d "${FREECAD_APPIMAGE_DIR}/squashfs-root" ]; then
+        info "Extracting FreeCAD AppImage squashfs payload"
+        (cd "${FREECAD_APPIMAGE_DIR}" && "${FREECAD_APPIMAGE_PATH}" --appimage-extract >/dev/null 2>&1)
+    fi
+
+    info "AppImage FreeCADCmd available at ${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+}
+
+main() {
+    freecadcmd_path=""
+    if command -v freecadcmd >/dev/null 2>&1; then
+        freecadcmd_path="$(command -v freecadcmd)"
+        info "FreeCADCmd already available: ${freecadcmd_path}"
+    else
+        case "$(uname -s)" in
+            Linux)
+                if command -v apt-get >/dev/null 2>&1; then
+                    install_with_apt
+                elif command -v dnf >/dev/null 2>&1; then
+                    install_with_dnf
+                elif command -v pacman >/dev/null 2>&1; then
+                    install_with_pacman
+                else
+                    warn "No supported package manager detected; preparing AppImage fallback."
+                    prepare_appimage
+                    freecadcmd_path="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+                fi
+                ;;
+            Darwin)
+                install_with_brew
+                ;;
+            *)
+                warn "Unsupported OS $(uname -s); preparing AppImage fallback."
+                prepare_appimage
+                freecadcmd_path="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+                ;;
+        esac
+        if [ -z "${freecadcmd_path}" ] && command -v freecadcmd >/dev/null 2>&1; then
+            freecadcmd_path="$(command -v freecadcmd)"
+        fi
+    fi
+
+    if [ -z "${freecadcmd_path}" ]; then
+        warn "FreeCADCmd not found on PATH. Use the AppImage fallback instructions printed below."
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        error "python3 is required but could not be installed automatically."
+    fi
+
+    info "Creating Python virtual environment for FreeCAD helpers"
+    python3 -m venv "${REPO_DIR}/.venv"
+    "${REPO_DIR}/.venv/bin/pip" install --upgrade pip wheel
+
+    cat <<SETUP_NOTE
+
+Setup complete.
+
+If FreeCADCmd is on PATH (${freecadcmd_path:-unavailable}), activate the helper environment and run:
+
+  source "${REPO_DIR}/.venv/bin/activate"
+  freecadcmd "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+
+For the AppImage fallback, ensure the environment variables are set before running:
+
+  source "${REPO_DIR}/.venv/bin/activate"
+  export FREECAD_APPIMAGE_DIR="${FREECAD_APPIMAGE_DIR}"
+  export FREECADPATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib/freecad/lib"
+  "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+
+SETUP_NOTE
+}
+
+main "$@"
