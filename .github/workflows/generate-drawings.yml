@@ -61,7 +61,7 @@ jobs:
             --paper Tabloid \
             --scale 1.0 \
             --no-titleblock \
-            --pdf-backend auto
+            --pdf-backend techdraw
 
       - name: Inspect generated drawings
         run: |
