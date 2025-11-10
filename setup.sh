@@ -215,6 +215,24 @@ USAGE
     python3 -m venv "${REPO_DIR}/.venv"
     "${REPO_DIR}/.venv/bin/pip" install --upgrade pip wheel
 
+    local python_bin_hint="\${FREECAD_PYTHON_BIN}"
+    local python_path_hint="\${FREECAD_PYTHONPATH_RESOLVED}"
+
+    if [ -x "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python" ]; then
+        if source "${REPO_DIR}/scripts/freecad_python_env.sh" >/dev/null 2>&1; then
+            if freecad_python_env >/dev/null 2>&1; then
+                python_bin_hint="${FREECAD_PYTHON_BIN}"
+                python_path_hint="${FREECAD_PYTHONPATH_RESOLVED}"
+            else
+                warn "Unable to resolve FreeCAD AppImage Python environment; instructions will reference helper variables."
+            fi
+        else
+            warn "Unable to source scripts/freecad_python_env.sh; instructions will reference helper variables."
+        fi
+    else
+        warn "FreeCAD AppImage Python interpreter not detected; instructions will reference helper variables."
+    fi
+
     cat <<SETUP_NOTE
 
 Setup complete.
@@ -236,8 +254,8 @@ For the AppImage fallback, ensure the environment variables are set before runni
   export LD_LIBRARY_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
   source "${REPO_DIR}/scripts/freecad_python_env.sh"
   freecad_python_env
-  export PYTHONPATH="${FREECAD_PYTHONPATH_RESOLVED}"
-  "${FREECAD_PYTHON_BIN}" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+  export PYTHONPATH="${python_path_hint}"
+  "${python_bin_hint}" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
 
 SETUP_NOTE
 }

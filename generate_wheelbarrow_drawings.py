@@ -25,7 +25,6 @@ import os
 import sys
 import tempfile
 import time
-import contextlib
 import re
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -882,9 +881,6 @@ TECHDRAW_TEMPLATE_MAP = {
     "Legal": {"titleblock": "ANSIB_Portrait.svg", "blank": None},
 }
 
-TECHDRAW_QT_APP: object | None = None
-
-
 def make_pdf_page_from_objects(
     doc: App.Document,
     objects: Iterable[App.DocumentObject],
@@ -958,41 +954,6 @@ def make_pdf_page_from_objects(
                 handle.write(_blank_template_svg(width_mm, height_mm))
         return template_path
 
-    def _ensure_techdraw_gui() -> Callable[[App.DocumentObject, str], None]:
-        global TECHDRAW_QT_APP
-
-        configure_fontconfig()
-
-        qt_widgets = None
-        try:
-            from PySide2 import QtWidgets  # type: ignore[import]
-            qt_widgets = QtWidgets
-        except Exception:
-            try:
-                from PySide6 import QtWidgets  # type: ignore[import,no-redef]
-                qt_widgets = QtWidgets
-            except Exception as exc:  # pragma: no cover - depends on runtime env
-                raise RuntimeError(f"Qt widgets unavailable for TechDraw export: {exc}")
-
-        if TECHDRAW_QT_APP is None:
-            TECHDRAW_QT_APP = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
-            TECHDRAW_QT_APP.setQuitOnLastWindowClosed(False)
-
-        import FreeCADGui
-
-        try:
-            FreeCADGui.setupWithoutGUI()
-        except Exception:
-            # setupWithoutGUI raises if already initialised; ignore to allow reuse.
-            pass
-
-        import TechDrawGui  # type: ignore[import]
-
-        if not hasattr(TechDrawGui, "exportPageAsPdf"):
-            raise RuntimeError("TechDrawGui lacks exportPageAsPdf; cannot produce PDF.")
-
-        return TechDrawGui.exportPageAsPdf
-
     def _make_doc_name(prefix: str) -> str:
         token = re.sub(r"[^0-9A-Za-z_]+", "_", prefix).strip("_") or "TechDraw"
         if token[0].isdigit():
@@ -1018,46 +979,110 @@ def make_pdf_page_from_objects(
         page.Template = template
 
         created_views: List[App.DocumentObject] = []
+        orientation_warning_emitted = False
 
-        try:
-            for index, obj in enumerate(objects, start=1):
-                candidate_name = _make_doc_name(f"{title}_DraftView_{index}")
+        def _supports_property(target: App.DocumentObject, property_name: str) -> bool:
+            """Return ``True`` when ``target`` exposes ``property_name``."""
 
-                view_type = "TechDraw::DrawViewDraft"
-                shape = getattr(obj, "Shape", None)
-                if shape is not None and not getattr(shape, "isNull", lambda: True)():
-                    view_type = "TechDraw::DrawViewPart"
+            has_prop = getattr(target, "hasProperty", None)
+            if callable(has_prop):
+                try:
+                    if has_prop(property_name):
+                        return True
+                except Exception:
+                    # ``hasProperty`` is not guaranteed to exist or accept the
+                    # queried attribute on every FreeCAD build. Fall back to
+                    # duck-typing if it misbehaves.
+                    pass
 
-                view = doc.addObject(view_type, candidate_name)
+            return hasattr(target, property_name)
+
+        def _set_view_orientation(
+            target: App.DocumentObject,
+        ) -> Tuple[bool, List[str], List[str]]:
+            """Attempt to apply TechDraw orientation vectors.
+
+            The return value contains ``(success, missing_required, missing_optional)``.
+            ``success`` is ``True`` when at least the required orientation properties
+            were assigned successfully. Missing properties are reported separately so
+            callers can surface a single descriptive warning message.
+            """
+
+            orientation_specs: Tuple[Tuple[str, App.Vector, bool], ...] = (
+                ("Direction", App.Vector(0, 0, 1), True),
+                ("XDirection", App.Vector(1, 0, 0), False),
+                ("YDirection", App.Vector(0, 1, 0), False),
+            )
+
+            missing_required: List[str] = []
+            missing_optional: List[str] = []
+            applied_any = False
+
+            for name, vector, required in orientation_specs:
+                if not _supports_property(target, name):
+                    (missing_required if required else missing_optional).append(name)
+                    continue
 
                 try:
-                    if view_type == "TechDraw::DrawViewPart":
-                        # DrawViewPart expects a sequence of sources; fall back to a
-                        # single link assignment if the FreeCAD build rejects lists.
-                        try:
-                            view.Source = [obj]
-                        except TypeError:
-                            view.Source = obj
-                    else:
+                    setattr(target, name, vector)
+                    applied_any = True
+                except Exception:
+                    (missing_required if required else missing_optional).append(name)
+
+            success = applied_any and not missing_required
+            return success, missing_required, missing_optional
+
+        for index, obj in enumerate(objects, start=1):
+            candidate_name = _make_doc_name(f"{title}_DraftView_{index}")
+
+            view_type = "TechDraw::DrawViewDraft"
+            shape = getattr(obj, "Shape", None)
+            if shape is not None and not getattr(shape, "isNull", lambda: True)():
+                view_type = "TechDraw::DrawViewPart"
+
+            view = doc.addObject(view_type, candidate_name)
+
+            try:
+                if view_type == "TechDraw::DrawViewPart":
+                    # DrawViewPart expects a sequence of sources; fall back to a
+                    # single link assignment if the FreeCAD build rejects lists.
+                    try:
+                        view.Source = [obj]
+                    except TypeError:
                         view.Source = obj
-                except TypeError as exc:
-                    raise RuntimeError(
-                        f"Unable to attach object '{obj.Label}' to TechDraw view"
-                    ) from exc
+                else:
+                    view.Source = obj
+            except TypeError as exc:
+                raise RuntimeError(
+                    f"Unable to attach object '{obj.Label}' to TechDraw view"
+                ) from exc
 
-                view.XDirection = App.Vector(1, 0, 0)
-                view.YDirection = App.Vector(0, 1, 0)
-                view.ScaleType = "Custom"
-                view.Scale = 1.0
+            _, missing_required, missing_optional = _set_view_orientation(view)
+            if (missing_required or missing_optional) and not orientation_warning_emitted:
+                missing_desc = ", ".join(sorted(missing_required + missing_optional))
+                if missing_required:
+                    print(
+                        "[WARN] TechDraw view missing required orientation properties "
+                        f"({missing_desc}); using FreeCAD defaults."
+                    )
+                else:
+                    print(
+                        "[WARN] TechDraw view missing optional orientation properties "
+                        f"({missing_desc}); continuing with available orientation."
+                    )
+                orientation_warning_emitted = True
 
-                page.addView(view)
-                created_views.append(view)
+            view.ScaleType = "Custom"
+            view.Scale = 1.0
 
-            if not created_views:
-                raise RuntimeError("No TechDraw views were created for PDF export.")
+            page.addView(view)
+            created_views.append(view)
 
+        if not created_views:
+            raise RuntimeError("No TechDraw views were created for PDF export.")
+
+        try:
             recompute(doc)
-
             if out_pdf_path:
                 abs_pdf_path = os.path.abspath(out_pdf_path)
                 if os.path.exists(abs_pdf_path):
@@ -1079,36 +1104,92 @@ def make_pdf_page_from_objects(
                     FreeCADGui.ActiveDocument = gui_doc
                     FreeCADGui.activateWorkbench("TechDrawWorkbench")
 
-                last_exc: Exception | None = None
+                export_exc: Exception | None = None
+                exporters: List[tuple[str, Callable[[object, str], None]]] = []
+                attempt_failures: List[str] = []
+                missing_techdraw_export = not hasattr(TechDraw, "exportPageAsPdf")
 
-                if hasattr(TechDraw, "exportPageAsPdf"):
-                    try:
-                        TechDraw.exportPageAsPdf(page, abs_pdf_path)
-                    except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                        last_exc = exc
+                if not missing_techdraw_export:
+                    exporters.append(("TechDraw.exportPageAsPdf", TechDraw.exportPageAsPdf))
+
+                techdraw_gui_note: str | None = None
+
+                try:  # pragma: no cover - depends on FreeCAD build
+                    import TechDrawGui  # type: ignore
+                except Exception as exc:
+                    TechDrawGui = None  # type: ignore
+                    techdraw_gui_note = f"TechDrawGui unavailable ({exc})"
+                else:
+                    if hasattr(TechDrawGui, "exportPageAsPdf"):
+                        exporters.append(
+                            ("TechDrawGui.exportPageAsPdf", TechDrawGui.exportPageAsPdf)
+                        )
                     else:
-                        last_exc = None
+                        techdraw_gui_note = (
+                            "TechDrawGui.exportPageAsPdf unavailable in this FreeCAD build."
+                        )
 
-                if last_exc is not None or not os.path.exists(abs_pdf_path):
-                    exporter = _ensure_techdraw_gui()
+                draw_page_note: str | None = None
+
+                if hasattr(page, "exportPageAsPdf"):
+                    exporters.append(
+                        (
+                            "DrawPage.exportPageAsPdf",
+                            lambda draw_page, dest: draw_page.exportPageAsPdf(dest),
+                        )
+                    )
+                else:
+                    draw_page_note = "DrawPage.exportPageAsPdf unavailable in this FreeCAD build."
+
+                used_exporter_label: str | None = None
+
+                for label, exporter in exporters:
                     try:
                         exporter(page, abs_pdf_path)
-                        last_exc = None
                     except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                        last_exc = exc
+                        attempt_failures.append(f"{label} failed: {exc}")
+                        continue
 
-                if last_exc is not None:
-                    raise RuntimeError(f"TechDraw export failed: {last_exc}")
+                    used_exporter_label = label
+                    break
+
+                if used_exporter_label is None:
+                    details: List[str] = []
+                    if missing_techdraw_export:
+                        details.append(
+                            "TechDraw.exportPageAsPdf unavailable in this FreeCAD build."
+                        )
+                    details.extend(attempt_failures)
+                    if techdraw_gui_note is not None:
+                        details.append(techdraw_gui_note)
+                    if draw_page_note is not None:
+                        details.append(draw_page_note)
+
+                    export_exc = RuntimeError(
+                        "; ".join(details)
+                        if details
+                        else "No TechDraw PDF export implementation succeeded."
+                    )
+                elif attempt_failures or missing_techdraw_export:
+                    info_parts: List[str] = []
+                    if missing_techdraw_export:
+                        info_parts.append("TechDraw.exportPageAsPdf unavailable")
+                    if attempt_failures:
+                        info_parts.extend(attempt_failures)
+                    details = "; ".join(info_parts)
+                    print(
+                        f"[WARN] TechDraw export used {used_exporter_label} fallback ({details})."
+                    )
 
                 deadline = time.time() + 10.0
                 while time.time() < deadline:
                     if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
                         break
-                    if TECHDRAW_QT_APP is not None:
-                        TECHDRAW_QT_APP.processEvents()
                     time.sleep(0.1)
 
                 if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
+                    if export_exc is not None:
+                        raise RuntimeError(f"TechDraw export failed: {export_exc}")
                     raise RuntimeError(
                         f"TechDraw export did not produce a PDF at {abs_pdf_path}."
                     )
@@ -1126,74 +1207,29 @@ def make_pdf_page_from_objects(
                 if doc.getObject(page.Name) is not None:
                     doc.removeObject(page.Name)
 
-        recompute(doc)
-        if out_pdf_path:
-            abs_pdf_path = os.path.abspath(out_pdf_path)
-            if os.path.exists(abs_pdf_path):
-                try:
-                    os.remove(abs_pdf_path)
-                except OSError as exc:
-                    raise RuntimeError(
-                        f"Unable to remove existing PDF before TechDraw export: {exc}"
-                    ) from exc
-
-            App.setActiveDocument(doc.Name)
-            App.ActiveDocument = doc
-
-            with contextlib.suppress(Exception):
-                import FreeCADGui
-
-                gui_doc = FreeCADGui.getDocument(doc.Name)
-                FreeCADGui.setActiveDocument(doc.Name)
-                FreeCADGui.ActiveDocument = gui_doc
-                FreeCADGui.activateWorkbench("TechDrawWorkbench")
-
-            last_exc: Exception | None = None
-
-            if hasattr(TechDraw, "exportPageAsPdf"):
-                try:
-                    TechDraw.exportPageAsPdf(page, abs_pdf_path)
-                except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                    last_exc = exc
-                else:
-                    last_exc = None
-
-            if last_exc is not None or not os.path.exists(abs_pdf_path):
-                exporter = _ensure_techdraw_gui()
-                try:
-                    exporter(page, abs_pdf_path)
-                    last_exc = None
-                except Exception as exc:  # pragma: no cover - depends on FreeCAD build
-                    last_exc = exc
-
-            if last_exc is not None:
-                raise RuntimeError(f"TechDraw export failed: {last_exc}")
-
-            deadline = time.time() + 10.0
-            while time.time() < deadline:
-                if os.path.exists(abs_pdf_path) and os.path.getsize(abs_pdf_path) > 0:
-                    break
-                if TECHDRAW_QT_APP is not None:
-                    TECHDRAW_QT_APP.processEvents()
-                time.sleep(0.1)
-
-            if not os.path.exists(abs_pdf_path) or os.path.getsize(abs_pdf_path) == 0:
-                raise RuntimeError(
-                    f"TechDraw export did not produce a PDF at {abs_pdf_path}."
-                )
-
     def _qt_pdf_fallback() -> None:
         if out_pdf_path is None:
             print("[INFO] TechDraw unavailable and no PDF path supplied; skipping PDF export.")
             return
 
+        configure_fontconfig()
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
         try:
-            from PySide2 import QtCore, QtGui, QtPrintSupport
+            from PySide2 import QtCore, QtGui, QtPrintSupport, QtWidgets
         except Exception:  # pragma: no cover - depends on FreeCAD build
             try:
-                from PySide6 import QtCore, QtGui, QtPrintSupport  # type: ignore[no-redef]
+                from PySide6 import QtCore, QtGui, QtPrintSupport, QtWidgets  # type: ignore[no-redef]
             except Exception as exc:  # pragma: no cover - depends on FreeCAD build
                 raise RuntimeError(f"Qt bindings unavailable for PDF fallback: {exc}")
+
+        qt_app = QtWidgets.QApplication.instance()
+        created_qt_app = False
+        if qt_app is None:
+            qt_app = QtWidgets.QApplication([])
+            qt_app.setQuitOnLastWindowClosed(False)
+            created_qt_app = True
 
         shapes = [getattr(obj, "Shape", None) for obj in objects]
         shapes = [shape for shape in shapes if shape is not None and not shape.isNull()]
@@ -1295,6 +1331,10 @@ def make_pdf_page_from_objects(
 
         print(f"[INFO] Qt PDF fallback wrote {out_pdf_path}")
 
+        if created_qt_app:
+            qt_app.processEvents()
+            qt_app.quit()
+
     backend = pdf_backend.lower()
     if backend not in PDF_BACKENDS:
         raise ValueError(f"Unsupported PDF backend '{pdf_backend}'")
@@ -1304,7 +1344,11 @@ def make_pdf_page_from_objects(
             raise RuntimeError(
                 "TechDraw backend requested but TechDraw module is unavailable."
             )
-        _techdraw_pdf()
+        try:
+            _techdraw_pdf()
+        except Exception as exc:
+            print(f"[WARN] TechDraw export failed ({exc}); using Qt fallback.")
+            _qt_pdf_fallback()
         return
 
     if backend == "qt":
