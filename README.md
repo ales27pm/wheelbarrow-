@@ -21,6 +21,7 @@ The script will:
 
 - Install FreeCAD using `apt`, `dnf`, `pacman`, or Homebrew when available, or download the official 1.0.2 AppImage as a fallback on Linux/unsupported systems.
 - Ensure Python 3, `pip`, and `venv` are available and create a virtual environment under `.venv/`.
+- Install the `defusedxml` runtime into `third_party/` so SVG tiling remains hardened even when the AppImage Python lacks extra packages.
 - Print usage instructions describing how to run the drawing generator with either the system `freecadcmd` binary or the AppImage's bundled Python runtime.
 
 ### Use the parametric macro
@@ -47,32 +48,37 @@ DXF/SVG exports are produced in the directory printed at the end of the run. Tec
 
 ### Standalone drawing generator
 
-For CI/CD pipelines or lightweight automation that only needs the 2D fabrication drawings (without instantiating the full parametric model) use the `generate_wheelbarrow_drawings.py` helper with the Python interpreter bundled inside the AppImage:
+For CI/CD pipelines or lightweight automation that only needs the 2D fabrication drawings (without instantiating the full parametric model) use the `generate_wheelbarrow_drawings.py` helper with the Python interpreter bundled inside the AppImage. The repository provides `scripts/freecad_python_env.sh` to centralise environment detection so documentation, CI workflows, and local shells stay in sync:
 
 ```bash
 ./FreeCAD.AppImage --appimage-extract
-FREECAD_ROOT="$PWD/squashfs-root"
-PYTHON_SITE_DIR=$(ls -d "$FREECAD_ROOT"/usr/lib/python3.* | head -n 1)
-export FREECADPATH="$FREECAD_ROOT/usr/lib/freecad/lib"
-export LD_LIBRARY_PATH="$FREECAD_ROOT/usr/lib:${LD_LIBRARY_PATH:-}"
-export PYTHONPATH="$PYTHON_SITE_DIR/site-packages:$FREECAD_ROOT/usr/lib"
+export FREECAD_APPIMAGE_DIR="$PWD"
+export FREECADPATH="$FREECAD_APPIMAGE_DIR/squashfs-root/usr/lib/freecad/lib"
+export LD_LIBRARY_PATH="$FREECAD_APPIMAGE_DIR/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
 export FREECAD_USER_HOME="$PWD/freecad_user"
 export XDG_RUNTIME_DIR="$PWD/runtime"
 mkdir -p "$FREECAD_USER_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-QT_QPA_PLATFORM=offscreen "$FREECAD_ROOT/usr/bin/python" generate_wheelbarrow_drawings.py \
-  --out ./plans --paper Tabloid --scale 1.0 --no-titleblock --pdf-backend auto
+
+source scripts/freecad_python_env.sh
+freecad_python_env
+export PYTHONPATH="$FREECAD_PYTHONPATH_RESOLVED"
+
+QT_QPA_PLATFORM=offscreen "$FREECAD_PYTHON_BIN" generate_wheelbarrow_drawings.py \
+  --out ./plans --paper Tabloid --scale 1.0 --no-titleblock --pdf-backend techdraw
 ```
 
-All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and PDF outputs to the directory specified by `--out`. By default the PDF comes from the TechDraw workbench (`--pdf-backend techdraw`); pass `--pdf-backend auto` or `--pdf-backend qt` to enable the Qt-based fallback when TechDraw is unavailable.
+All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and PDF outputs to the directory specified by `--out`. By default the PDF comes from the TechDraw workbench (`--pdf-backend techdraw`); pass `--pdf-backend auto` or `--pdf-backend qt` to enable the Qt-based fallback when TechDraw is unavailable and a best-effort export is acceptable.
 
 Pass `--validate` to assert a handful of critical measurements (wheel diameter and rail length/widths) after generation—ideal for catching geometry drift when upgrading FreeCAD. Use `--pdf-per-part` to emit an additional PDF per part group and `--tile-a4` to split `all_parts.svg` into overlapping A4 tiles for household printing when large-format paper is unavailable.
+
+When invoking via `FreeCADCmd`, remember to insert the `--` sentinel before any drawing-generator arguments (`freecadcmd --python generate_wheelbarrow_drawings.py -- --out …`). Direct Python executions—whether via the AppImage runtime or a local interpreter—should omit the sentinel because arguments are passed directly to `argparse`.
 
 ### Automated artifact builds
 
 Every push, pull request, or manual dispatch triggers the **Build wheelbarrow fabrication artifacts** GitHub Actions workflow. The pipeline downloads the official FreeCAD 1.0.2 AppImage, runs the macro headlessly with `freecadcmd`, and uploads the generated DXF, SVG, FCStd, and (when available) TechDraw PDF files as a downloadable workflow artifact. Navigate to the workflow run in the Actions tab and download the `wheelbarrow-fabrication-assets` bundle to retrieve the latest fabrication-ready outputs (both as individual files under `raw/` and as a single `wheelbarrow-fabrication.tar.gz` archive).
 
-For lightweight automation focused solely on the 2D fabrication drawings, the **Generate wheelbarrow drawing plans** workflow executes `generate_wheelbarrow_drawings.py` with the same FreeCAD AppImage. It emits the DXF, SVG, and PDF (when TechDraw is available) deliverables to an artifact named `wheelbarrow-drawing-plans`, mirroring the CLI example above so you can fetch ready-to-print templates without building the full parametric model.
+For lightweight automation focused solely on the 2D fabrication drawings, the **Generate wheelbarrow drawing plans** workflow executes `generate_wheelbarrow_drawings.py` with the same FreeCAD AppImage. It now enforces the TechDraw backend (`--pdf-backend techdraw`) so the pipeline fails fast if the workbench cannot produce a PDF, guaranteeing that published artifacts always come from TechDraw. Successful runs emit the DXF, SVG, and PDF deliverables to an artifact named `wheelbarrow-drawing-plans`, mirroring the CLI example above so you can fetch ready-to-print templates without building the full parametric model.
 
 ## Notes
 
