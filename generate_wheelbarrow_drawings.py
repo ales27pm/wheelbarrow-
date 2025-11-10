@@ -1018,6 +1018,27 @@ def make_pdf_page_from_objects(
         page.Template = template
 
         created_views: List[App.DocumentObject] = []
+        orientation_warning_emitted = False
+
+        def _set_view_vector_property(
+            target: App.DocumentObject, property_name: str, value: App.Vector
+        ) -> bool:
+            """Assign ``value`` to ``property_name`` when supported by ``target``."""
+
+            has_prop = getattr(target, "hasProperty", None)
+            if callable(has_prop) and has_prop(property_name):
+                setattr(target, property_name, value)
+                return True
+
+            if hasattr(target, property_name):
+                try:
+                    setattr(target, property_name, value)
+                except AttributeError:
+                    return False
+                else:
+                    return True
+
+            return False
 
         try:
             for index, obj in enumerate(objects, start=1):
@@ -1045,8 +1066,24 @@ def make_pdf_page_from_objects(
                         f"Unable to attach object '{obj.Label}' to TechDraw view"
                     ) from exc
 
-                view.XDirection = App.Vector(1, 0, 0)
-                view.YDirection = App.Vector(0, 1, 0)
+                if not _set_view_vector_property(
+                    view, "XDirection", App.Vector(1, 0, 0)
+                ):
+                    if not orientation_warning_emitted:
+                        print(
+                            "[WARN] TechDraw view missing XDirection property; using FreeCAD defaults."
+                        )
+                        orientation_warning_emitted = True
+
+                if not _set_view_vector_property(
+                    view, "YDirection", App.Vector(0, 1, 0)
+                ):
+                    if not orientation_warning_emitted:
+                        print(
+                            "[WARN] TechDraw view missing YDirection property; using FreeCAD defaults."
+                        )
+                        orientation_warning_emitted = True
+
                 view.ScaleType = "Custom"
                 view.Scale = 1.0
 
