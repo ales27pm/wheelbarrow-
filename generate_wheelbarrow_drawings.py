@@ -316,7 +316,7 @@ def make_side_panel(
     )
     add_text(
         doc,
-        f"{label} — {L} × {H} (panel thickness {params['wood_thick_panels']})",
+        f"{label} — {L} × {H} (panel thickness {params['wood_thick_panels']} mm)",
         (origin[0] + L / 2.0, origin[1] + H + 6.0),
         size=4.0,
     )
@@ -480,7 +480,7 @@ def make_wheel(
     add_diameter_dimension(doc, (cx, cy), dH / 2.0, (cx, cy - D / 2.0 - 10.0))
     add_text(
         doc,
-        f"{label} — Ø{D} (thickness {params['wood_thick_struct']})  hub Ø{dH}",
+        f"{label} — Ø{D} (thickness {params['wood_thick_struct']} mm)  hub Ø{dH} mm",
         (cx, cy + D / 2.0 + 18.0),
         size=4.0,
     )
