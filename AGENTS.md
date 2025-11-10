@@ -18,3 +18,6 @@ These rules apply to the entire repository.
 ## Pull Requests
 - Summaries should highlight functional user-facing changes and any new scripts or commands.
 - Note any limitations or manual steps required to exercise the changes.
+
+## Session Setup
+- Always run `setup.sh` at the beginning of each session.
