@@ -7,6 +7,7 @@ FREECAD_APPIMAGE_VERSION="1.0.2"
 FREECAD_CACHE_DIR="${REPO_DIR}/.freecad"
 FREECAD_APPIMAGE_DIR="${FREECAD_CACHE_DIR}/appimage-${FREECAD_APPIMAGE_VERSION}"
 FREECAD_APPIMAGE_PATH="${FREECAD_APPIMAGE_DIR}/FreeCAD_${FREECAD_APPIMAGE_VERSION}.AppImage"
+FREECAD_APPIMAGE_CMD_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
 FREECAD_APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_APPIMAGE_VERSION}/FreeCAD_${FREECAD_APPIMAGE_VERSION}-conda-Linux-x86_64-py311.AppImage"
 APPIMAGE_RUNTIME_DEPS=(
     fonts-dejavu-core
@@ -26,10 +27,6 @@ APPIMAGE_RUNTIME_DEPS=(
     xz-utils
 )
 
-APPIMAGE_OPTIONAL_DEPS=(
-    libgl1-mesa-glx
-)
-
 info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*"; exit 1; }
@@ -41,22 +38,22 @@ need_cmd() {
 }
 
 install_with_apt() {
-    info "Installing FreeCAD and Python runtime with apt-get"
+    info "Installing Python runtime prerequisites with apt-get"
     need_cmd sudo
     sudo apt-get update
-    sudo apt-get install -y freecad freecad-common python3 python3-venv python3-pip
+    sudo apt-get install -y python3 python3-venv python3-pip
 }
 
 install_with_dnf() {
-    info "Installing FreeCAD and Python runtime with dnf"
+    info "Installing Python runtime prerequisites with dnf"
     need_cmd sudo
-    sudo dnf install -y freecad python3 python3-pip
+    sudo dnf install -y python3 python3-pip
 }
 
 install_with_pacman() {
-    info "Installing FreeCAD and Python runtime with pacman"
+    info "Installing Python runtime prerequisites with pacman"
     need_cmd sudo
-    sudo pacman -Sy --noconfirm freecad python python-pip
+    sudo pacman -Sy --noconfirm python python-pip
 }
 
 install_with_brew() {
@@ -79,13 +76,16 @@ install_appimage_runtime_deps() {
         need_cmd sudo
         sudo apt-get update
         sudo apt-get install -y "${APPIMAGE_RUNTIME_DEPS[@]}"
-        for pkg in "${APPIMAGE_OPTIONAL_DEPS[@]}"; do
-            if ! sudo apt-get install -y "$pkg"; then
-                warn "Optional AppImage dependency '$pkg' could not be installed."
-            fi
-        done
     else
         warn "AppImage runtime dependency installation is only automated for apt-get; please install equivalents manually."
+    fi
+}
+
+prepare_appimage_with_runtime() {
+    install_appimage_runtime_deps
+    prepare_appimage
+    if [ ! -x "${FREECAD_APPIMAGE_CMD_PATH}" ]; then
+        warn "FreeCADCmd from the AppImage is not executable at ${FREECAD_APPIMAGE_CMD_PATH}."
     fi
 }
 
@@ -180,10 +180,12 @@ USAGE
                 elif command -v pacman >/dev/null 2>&1; then
                     install_with_pacman
                 else
-                    warn "No supported package manager detected; preparing AppImage fallback."
-                    prepare_appimage
-                    freecadcmd_path="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+                    warn "No supported package manager detected; attempting AppImage setup without additional prerequisites."
                 fi
+
+                info "Preparing FreeCAD AppImage from GitHub release"
+                prepare_appimage_with_runtime
+                freecadcmd_path="${FREECAD_APPIMAGE_CMD_PATH}"
                 ;;
             Darwin)
                 install_with_brew
