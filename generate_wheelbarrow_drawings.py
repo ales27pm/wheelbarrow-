@@ -844,10 +844,10 @@ def make_pdf_page_from_objects(
             return
 
         try:
-            from PySide2 import QtCore, QtGui
+            from PySide2 import QtCore, QtGui, QtPrintSupport
         except Exception:  # pragma: no cover - depends on FreeCAD build
             try:
-                from PySide6 import QtCore, QtGui  # type: ignore[no-redef]
+                from PySide6 import QtCore, QtGui, QtPrintSupport  # type: ignore[no-redef]
             except Exception as exc:  # pragma: no cover - depends on FreeCAD build
                 raise RuntimeError(f"Qt bindings unavailable for PDF fallback: {exc}")
 
@@ -890,11 +890,22 @@ def make_pdf_page_from_objects(
         translate_x = offset_x_pt - bbox.XMin * scale_pt_per_mm
         translate_y = offset_y_pt
 
-        writer = QtGui.QPdfWriter(out_pdf_path)
-        writer.setPageSizeMM(QtCore.QSizeF(page_w_mm, page_h_mm))
-        writer.setResolution(300)
+        printer = QtPrintSupport.QPrinter(QtPrintSupport.QPrinter.HighResolution)
+        printer.setOutputFormat(QtPrintSupport.QPrinter.PdfFormat)
+        printer.setOutputFileName(out_pdf_path)
+        printer.setResolution(300)
+        printer.setPageMargins(
+            margin_side_mm,
+            margin_top_mm,
+            margin_side_mm,
+            margin_bottom_mm,
+            QtPrintSupport.QPrinter.Millimeter,
+        )
+        printer.setPageSizeMM(QtCore.QSizeF(page_w_mm, page_h_mm))
 
-        painter = QtGui.QPainter(writer)
+        painter = QtGui.QPainter(printer)
+        if not painter.isActive():  # pragma: no cover - depends on runtime env
+            raise RuntimeError(f"Could not activate PDF painter for {out_pdf_path}")
         painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
 
         pen = QtGui.QPen(QtCore.Qt.black)
@@ -1034,10 +1045,12 @@ def main(argv: List[str] | None = None) -> int:
 
     doc.saveAs(os.path.join(args.outdir, "freecad_source.FCStd"))
     print(f"[OK] Exports in: {args.outdir}")
-    if TECHDRAW_AVAILABLE:
+    if os.path.exists(pdf_path):
         print(f"[OK] PDF: {pdf_path}")
+    elif TECHDRAW_AVAILABLE:
+        print("[WARN] TechDraw was available but PDF export did not create a file.")
     else:
-        print("[INFO] TechDraw not available; PDF skipped.")
+        print("[INFO] TechDraw unavailable; PDF fallback skipped or failed.")
     return 0
 
 

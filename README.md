@@ -54,7 +54,7 @@ For CI/CD pipelines or lightweight automation that only needs the 2D fabrication
   --out ./plans --paper Tabloid --scale 1.0 --no-titleblock
 ```
 
-All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and—when TechDraw is available—PDF outputs to the directory specified by `--out`.
+All linear dimensions can be scaled uniformly via `--scale` (for example, `--scale 0.5` produces half-size drawings). The script writes DXF, SVG, and PDF outputs to the directory specified by `--out`; when the TechDraw workbench is missing the exporter falls back to a Qt-based PDF generator so CI/CD jobs still publish a sheet.
 
 ### Automated artifact builds
 
