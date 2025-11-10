@@ -22,6 +22,7 @@ import argparse
 import math
 import os
 import sys
+import tempfile
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 # --- FreeCAD / Workbenches ---
@@ -102,6 +103,15 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
+def _set_view_properties(obj: App.DocumentObject, **props: float) -> None:
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        return
+    for key, value in props.items():
+        if hasattr(view, key):
+            setattr(view, key, value)
+
+
 def recompute(doc: App.Document) -> None:
     try:
         doc.recompute()
@@ -110,8 +120,8 @@ def recompute(doc: App.Document) -> None:
 
 
 def add_text(doc: App.Document, text: str, pos: Vector2D, *, size: float = 4.0) -> App.DocumentObject:
-    annotation = Draft.make_text([text], point=App.Vector(pos[0], pos[1], 0))
-    annotation.ViewObject.FontSize = size
+    annotation = Draft.make_text([text], App.Vector(pos[0], pos[1], 0))
+    _set_view_properties(annotation, FontSize=size)
     return annotation
 
 
@@ -120,10 +130,13 @@ def add_linear_dimension(doc: App.Document, p1: Vector2D, p2: Vector2D, dim_pos:
     v2 = App.Vector(p2[0], p2[1], 0)
     vdim = App.Vector(dim_pos[0], dim_pos[1], 0)
     dim = Draft.make_dimension(v1, v2, vdim)
-    dim.ViewObject.FontSize = 3.0
-    dim.ViewObject.ArrowSize = 2.0
-    dim.ViewObject.ExtLines = 1
-    dim.ViewObject.ShowUnit = False
+    _set_view_properties(
+        dim,
+        FontSize=3.0,
+        ArrowSize=2.0,
+        ExtLines=1,
+        ShowUnit=False,
+    )
     return dim
 
 
@@ -804,6 +817,19 @@ def export_group(objects: Iterable[App.DocumentObject], out_path_base: str) -> N
         raise RuntimeError("; ".join(errors))
 
 
+PDF_BACKENDS = ("techdraw", "qt", "auto")
+
+TECHDRAW_TEMPLATE_MAP = {
+    "A4": {"titleblock": "A4_Landscape_TD.svg", "blank": "A4_Landscape_blank.svg"},
+    "A3": {"titleblock": "A3_Landscape_TD.svg", "blank": "A3_Landscape_blank.svg"},
+    "Tabloid": {"titleblock": "ANSIB_Landscape.svg", "blank": "ANSIB_Landscape_blank.svg"},
+    "Letter": {"titleblock": "ANSIA_Landscape.svg", "blank": "ANSIA_Landscape_blank.svg"},
+    "Legal": {"titleblock": "ANSIB_Portrait.svg", "blank": None},
+}
+
+TECHDRAW_QT_APP: object | None = None
+
+
 def make_pdf_page_from_objects(
     doc: App.Document,
     objects: Iterable[App.DocumentObject],
@@ -813,17 +839,107 @@ def make_pdf_page_from_objects(
     out_pdf_path: str | None = None,
     with_titleblock: bool = True,
     scale_hint: float = 1.0,
+    pdf_backend: str = "techdraw",
 ) -> None:
+    def _blank_template_svg(width_mm: float, height_mm: float) -> str:
+        return (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<svg width=\"{width}mm\" height=\"{height}mm\" "
+            "viewBox=\"0 0 {width} {height}\" version=\"1.1\" "
+            "xmlns=\"http://www.w3.org/2000/svg\" "
+            "xmlns:cc=\"http://creativecommons.org/ns#\" "
+            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+            "xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n"
+            " <metadata>\n"
+            "  <rdf:RDF>\n"
+            "   <cc:Work rdf:about=\"\">\n"
+            "    <dc:format>image/svg+xml</dc:format>\n"
+            "    <dc:type rdf:resource=\"http://purl.org/dc/dcmitype/StillImage\"/>\n"
+            "   </cc:Work>\n"
+            "  </rdf:RDF>\n"
+            " </metadata>\n"
+            "</svg>\n"
+        ).format(width=f"{width_mm:.3f}", height=f"{height_mm:.3f}")
+
+    def _sanitize_for_filename(*parts: str) -> str:
+        cleaned: List[str] = []
+        for part in parts:
+            token = part.lower().replace(" ", "_").replace("/", "-")
+            cleaned.append(token)
+        return "_".join(cleaned)
+
+    def _get_standard_template_path(template_name: str) -> str:
+        resource_dir = App.getResourceDir()
+        candidate = os.path.join(resource_dir, "Mod", "TechDraw", "Templates", template_name)
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(
+                f"TechDraw template '{template_name}' not found under {resource_dir}"
+            )
+        return candidate
+
+    def _resolve_template_path(width_mm: float, height_mm: float) -> str:
+        mapping = TECHDRAW_TEMPLATE_MAP.get(paper) or TECHDRAW_TEMPLATE_MAP[DEFAULT_PAPER]
+        key = "titleblock" if with_titleblock else "blank"
+        template_name = mapping.get(key)
+        if template_name:
+            return _get_standard_template_path(template_name)
+
+        cache_root = os.path.join(
+            os.path.dirname(out_pdf_path) if out_pdf_path else tempfile.gettempdir(),
+            "_techdraw_templates",
+        )
+        ensure_dir(cache_root)
+        file_name = _sanitize_for_filename(
+            paper,
+            "blank",
+            f"{width_mm:.1f}".replace(".", "_"),
+            f"{height_mm:.1f}".replace(".", "_"),
+        )
+        template_path = os.path.join(cache_root, f"{file_name}.svg")
+        if not os.path.exists(template_path):
+            with open(template_path, "w", encoding="utf-8") as handle:
+                handle.write(_blank_template_svg(width_mm, height_mm))
+        return template_path
+
+    def _ensure_techdraw_gui() -> Callable[[App.DocumentObject, str], None]:
+        global TECHDRAW_QT_APP
+
+        qt_widgets = None
+        try:
+            from PySide2 import QtWidgets  # type: ignore[import]
+            qt_widgets = QtWidgets
+        except Exception:
+            try:
+                from PySide6 import QtWidgets  # type: ignore[import,no-redef]
+                qt_widgets = QtWidgets
+            except Exception as exc:  # pragma: no cover - depends on runtime env
+                raise RuntimeError(f"Qt widgets unavailable for TechDraw export: {exc}")
+
+        if TECHDRAW_QT_APP is None:
+            TECHDRAW_QT_APP = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+            TECHDRAW_QT_APP.setQuitOnLastWindowClosed(False)
+
+        import FreeCADGui
+
+        try:
+            FreeCADGui.setupWithoutGUI()
+        except Exception:
+            # setupWithoutGUI raises if already initialised; ignore to allow reuse.
+            pass
+
+        import TechDrawGui  # type: ignore[import]
+
+        if not hasattr(TechDrawGui, "exportPageAsPdf"):
+            raise RuntimeError("TechDrawGui lacks exportPageAsPdf; cannot produce PDF.")
+
+        return TechDrawGui.exportPageAsPdf
+
     def _techdraw_pdf() -> None:
         page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
-        if with_titleblock:
-            template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
-            template.Template = TechDraw.getStandardTemplate("A4_LandscapeTD.svg")
-            page.Template = template
-        else:
-            w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
-            page.Width = w
-            page.Height = h
+        w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
+        template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
+        template.Template = _resolve_template_path(w, h)
+        page.Template = template
 
         for i, obj in enumerate(objects):
             view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
@@ -833,10 +949,13 @@ def make_pdf_page_from_objects(
         recompute(doc)
 
         if out_pdf_path:
-            try:
-                page.exportPageAsPdf(out_pdf_path)
-            except Exception as exc:  # pragma: no cover - depends on TechDraw
-                print(f"[WARN] PDF export failed ({out_pdf_path}): {exc}")
+            abs_pdf_path = os.path.abspath(out_pdf_path)
+            exporter = _ensure_techdraw_gui()
+            exporter(page, abs_pdf_path)
+            if not os.path.exists(abs_pdf_path):
+                raise RuntimeError(
+                    f"TechDraw export did not produce a PDF at {abs_pdf_path}."
+                )
 
     def _qt_pdf_fallback() -> None:
         if out_pdf_path is None:
@@ -951,13 +1070,34 @@ def make_pdf_page_from_objects(
 
         print(f"[INFO] Qt PDF fallback wrote {out_pdf_path}")
 
-    if TECHDRAW_AVAILABLE:
+    backend = pdf_backend.lower()
+    if backend not in PDF_BACKENDS:
+        raise ValueError(f"Unsupported PDF backend '{pdf_backend}'")
+
+    if backend == "techdraw":
+        if not TECHDRAW_AVAILABLE:
+            raise RuntimeError(
+                "TechDraw backend requested but TechDraw module is unavailable."
+            )
         _techdraw_pdf()
-    else:
+        return
+
+    if backend == "qt":
+        _qt_pdf_fallback()
+        return
+
+    # backend == "auto"
+    if TECHDRAW_AVAILABLE:
         try:
-            _qt_pdf_fallback()
-        except Exception as exc:  # pragma: no cover - depends on runtime env
-            print(f"[WARN] TechDraw unavailable and PDF fallback failed: {exc}")
+            _techdraw_pdf()
+            return
+        except Exception as exc:
+            print(f"[WARN] TechDraw export failed ({exc}); falling back to Qt.")
+
+    try:
+        _qt_pdf_fallback()
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        print(f"[WARN] TechDraw unavailable and PDF fallback failed: {exc}")
 
 
 # -----------------------------
@@ -996,6 +1136,16 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         dest="no_titleblock",
         action="store_true",
         help="Generate the PDF without a title block (exact paper size)",
+    )
+    parser.add_argument(
+        "--pdf-backend",
+        dest="pdf_backend",
+        default="techdraw",
+        choices=PDF_BACKENDS,
+        help=(
+            "PDF export backend to use: 'techdraw' (default, requires TechDraw), "
+            "'qt' (PySide fallback), or 'auto' (TechDraw when available, otherwise Qt)."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -1041,16 +1191,24 @@ def main(argv: List[str] | None = None) -> int:
         out_pdf_path=pdf_path,
         with_titleblock=(not args.no_titleblock),
         scale_hint=args.scale,
+        pdf_backend=args.pdf_backend,
     )
 
     doc.saveAs(os.path.join(args.outdir, "freecad_source.FCStd"))
     print(f"[OK] Exports in: {args.outdir}")
     if os.path.exists(pdf_path):
-        print(f"[OK] PDF: {pdf_path}")
-    elif TECHDRAW_AVAILABLE:
-        print("[WARN] TechDraw was available but PDF export did not create a file.")
+        print(f"[OK] PDF ({args.pdf_backend} backend): {pdf_path}")
     else:
-        print("[INFO] TechDraw unavailable; PDF fallback skipped or failed.")
+        if args.pdf_backend == "techdraw":
+            print("[WARN] TechDraw was available but PDF export did not create a file.")
+        elif args.pdf_backend == "qt":
+            print("[WARN] Qt PDF backend requested but no file was generated.")
+        elif TECHDRAW_AVAILABLE:
+            print(
+                "[WARN] TechDraw was available but auto PDF export did not create a file."
+            )
+        else:
+            print("[INFO] TechDraw unavailable; PDF fallback skipped or failed.")
     return 0
 
 
