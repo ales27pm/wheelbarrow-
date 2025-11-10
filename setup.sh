@@ -100,7 +100,19 @@ prepare_appimage() {
         (cd "${FREECAD_APPIMAGE_DIR}" && "${FREECAD_APPIMAGE_PATH}" --appimage-extract >/dev/null 2>&1)
     fi
 
+    local python_bin="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python"
+    local python_path_hint=""
+    for candidate in "${FREECAD_APPIMAGE_DIR}"/squashfs-root/usr/lib/python3.*; do
+        if [ -d "${candidate}" ]; then
+            python_path_hint="${candidate}/site-packages:${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib"
+            break
+        fi
+    done
+
     info "AppImage FreeCADCmd available at ${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+    if [ -x "${python_bin}" ]; then
+        info "AppImage Python available at ${python_bin}"
+    fi
 }
 
 main() {
@@ -113,6 +125,19 @@ main() {
                     {
                         echo "FREECAD_APPIMAGE_DIR=${FREECAD_APPIMAGE_DIR}"
                         echo "FREECADCMD_PATH=${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd"
+                        if [ -x "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python" ]; then
+                            echo "FREECAD_PYTHON=${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python"
+                        fi
+                        python_path_hint=""
+                        for candidate in "${FREECAD_APPIMAGE_DIR}"/squashfs-root/usr/lib/python3.*; do
+                            if [ -d "${candidate}" ]; then
+                                python_path_hint="${candidate}/site-packages:${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib"
+                                break
+                            fi
+                        done
+                        if [ -n "${python_path_hint}" ]; then
+                            echo "FREECAD_PYTHONPATH=${python_path_hint}"
+                        fi
                     } >>"${GITHUB_ENV}"
                 fi
                 info "FreeCAD AppImage ready at ${FREECAD_APPIMAGE_DIR}"
@@ -186,14 +211,17 @@ Setup complete.
 If FreeCADCmd is on PATH (${freecadcmd_path:-unavailable}), activate the helper environment and run:
 
   source "${REPO_DIR}/.venv/bin/activate"
-  freecadcmd "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+  freecadcmd --console --python "${REPO_DIR}/generate_wheelbarrow_drawings.py" -- --out ./plans
 
 For the AppImage fallback, ensure the environment variables are set before running:
 
   source "${REPO_DIR}/.venv/bin/activate"
   export FREECAD_APPIMAGE_DIR="${FREECAD_APPIMAGE_DIR}"
   export FREECADPATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib/freecad/lib"
-  "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/freecadcmd" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
+  export LD_LIBRARY_PATH="${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib:${LD_LIBRARY_PATH:-}"
+  PYTHON_SITE_DIR=$(ls -d "${FREECAD_APPIMAGE_DIR}"/squashfs-root/usr/lib/python3.* | head -n 1)
+  export PYTHONPATH="${PYTHON_SITE_DIR}/site-packages:${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/lib"
+  "${FREECAD_APPIMAGE_DIR}/squashfs-root/usr/bin/python" "${REPO_DIR}/generate_wheelbarrow_drawings.py" --out ./plans
 
 SETUP_NOTE
 }
