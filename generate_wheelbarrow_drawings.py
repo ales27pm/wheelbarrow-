@@ -5,8 +5,10 @@
 This module reproduces the headless export pipeline that previously lived only
 inside the `MiniWheelbarrow.FCMacro` macro. Running it with ``FreeCADCmd``
 creates 2D profiles for every part (rails, tray panels, spreaders, legs, axle
-block, and wheel) and exports them as DXF/SVG files. When the TechDraw
-workbench is available a consolidated PDF sheet is produced as well.
+block, and wheel) and exports them as DXF/SVG files. A consolidated PDF sheet is
+produced via TechDraw when the workbench is available; otherwise a Qt-based
+fallback renders a simplified outline-only PDF so CI jobs still publish a PDF
+artifact.
 
 The script defaults to generating the original 1:1 drawings, but all linear
 dimensions can be scaled uniformly via ``--scale``. Scaling affects every
@@ -810,33 +812,141 @@ def make_pdf_page_from_objects(
     title: str = "Sheet",
     out_pdf_path: str | None = None,
     with_titleblock: bool = True,
+    scale_hint: float = 1.0,
 ) -> None:
-    if not TECHDRAW_AVAILABLE:
-        print("[INFO] TechDraw not available: PDF not generated.")
-        return
+    def _techdraw_pdf() -> None:
+        page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
+        if with_titleblock:
+            template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
+            template.Template = TechDraw.getStandardTemplate("A4_LandscapeTD.svg")
+            page.Template = template
+        else:
+            w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
+            page.Width = w
+            page.Height = h
 
-    page = doc.addObject("TechDraw::DrawPage", f"{title}_Page")
-    if with_titleblock:
-        template = doc.addObject("TechDraw::DrawSVGTemplate", f"{title}_Template")
-        template.Template = TechDraw.getStandardTemplate("A4_LandscapeTD.svg")
-        page.Template = template
-    else:
-        w, h = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
-        page.Width = w
-        page.Height = h
+        for i, obj in enumerate(objects):
+            view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
+            view.Source = [obj]
+            page.addView(view)
 
-    for i, obj in enumerate(objects):
-        view = doc.addObject("TechDraw::DrawViewPart", f"{title}_View_{i + 1}")
-        view.Source = [obj]
-        page.addView(view)
+        recompute(doc)
 
-    recompute(doc)
+        if out_pdf_path:
+            try:
+                page.exportPageAsPdf(out_pdf_path)
+            except Exception as exc:  # pragma: no cover - depends on TechDraw
+                print(f"[WARN] PDF export failed ({out_pdf_path}): {exc}")
 
-    if out_pdf_path:
+    def _qt_pdf_fallback() -> None:
+        if out_pdf_path is None:
+            print("[INFO] TechDraw unavailable and no PDF path supplied; skipping PDF export.")
+            return
+
         try:
-            page.exportPageAsPdf(out_pdf_path)
-        except Exception as exc:  # pragma: no cover - depends on TechDraw
-            print(f"[WARN] PDF export failed ({out_pdf_path}): {exc}")
+            from PySide2 import QtCore, QtGui
+        except Exception:  # pragma: no cover - depends on FreeCAD build
+            try:
+                from PySide6 import QtCore, QtGui  # type: ignore[no-redef]
+            except Exception as exc:  # pragma: no cover - depends on FreeCAD build
+                raise RuntimeError(f"Qt bindings unavailable for PDF fallback: {exc}")
+
+        shapes = [getattr(obj, "Shape", None) for obj in objects]
+        shapes = [shape for shape in shapes if shape is not None and not shape.isNull()]
+        if not shapes:
+            raise RuntimeError("No shapes available for PDF fallback export.")
+
+        bbox = shapes[0].BoundBox
+        for shape in shapes[1:]:
+            bbox.add(shape.BoundBox)
+
+        page_w_mm, page_h_mm = PAPER_SIZES_MM.get(paper, PAPER_SIZES_MM[DEFAULT_PAPER])
+        margin_top_mm = 18.0 if with_titleblock else 10.0
+        margin_side_mm = 10.0
+        margin_bottom_mm = 12.0
+
+        def mm_to_pt(mm: float) -> float:
+            return mm * 72.0 / 25.4
+
+        page_w_pt = mm_to_pt(page_w_mm)
+        page_h_pt = mm_to_pt(page_h_mm)
+        usable_w_pt = page_w_pt - 2.0 * mm_to_pt(margin_side_mm)
+        usable_h_pt = page_h_pt - (mm_to_pt(margin_top_mm) + mm_to_pt(margin_bottom_mm))
+        width_mm = max(bbox.XLength, 1e-3)
+        height_mm = max(bbox.YLength, 1e-3)
+        scale_pt_per_mm = min(usable_w_pt / width_mm, usable_h_pt / height_mm)
+        # Respect the requested scale hint by adjusting the drawing scale factor.
+        if scale_hint > 0:
+            scale_pt_per_mm /= scale_hint
+
+        content_w_pt = width_mm * scale_pt_per_mm
+        content_h_pt = height_mm * scale_pt_per_mm
+        offset_x_pt = mm_to_pt(margin_side_mm) + max(0.0, (usable_w_pt - content_w_pt) / 2.0)
+        offset_y_pt = (
+            mm_to_pt(margin_top_mm)
+            + max(0.0, (usable_h_pt - content_h_pt) / 2.0)
+            + bbox.YMax * scale_pt_per_mm
+        )
+        translate_x = offset_x_pt - bbox.XMin * scale_pt_per_mm
+        translate_y = offset_y_pt
+
+        writer = QtGui.QPdfWriter(out_pdf_path)
+        writer.setPageSizeMM(QtCore.QSizeF(page_w_mm, page_h_mm))
+        writer.setResolution(300)
+
+        painter = QtGui.QPainter(writer)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        pen = QtGui.QPen(QtCore.Qt.black)
+        pen.setWidthF(0.2)
+        painter.setPen(pen)
+
+        transform = QtGui.QTransform()
+        transform.translate(translate_x, translate_y)
+        transform.scale(scale_pt_per_mm, -scale_pt_per_mm)
+        painter.setTransform(transform)
+
+        try:
+            for shape in shapes:
+                for edge in shape.Edges:
+                    pts = edge.discretize(Deflection=0.25)
+                    if len(pts) < 2:
+                        continue
+                    path = QtGui.QPainterPath(QtCore.QPointF(pts[0].x, pts[0].y))
+                    for pt in pts[1:]:
+                        path.lineTo(pt.x, pt.y)
+                    painter.drawPath(path)
+        finally:
+            painter.resetTransform()
+
+            if with_titleblock:
+                painter.setPen(QtGui.QPen(QtCore.Qt.black))
+                font = QtGui.QFont()
+                font.setPointSizeF(10.0)
+                painter.setFont(font)
+                title_rect = QtCore.QRectF(
+                    mm_to_pt(margin_side_mm),
+                    mm_to_pt(5.0),
+                    page_w_pt - 2.0 * mm_to_pt(margin_side_mm),
+                    mm_to_pt(margin_top_mm - 6.0),
+                )
+                painter.drawText(
+                    title_rect,
+                    QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                    f"{title} (scale {scale_hint:.2f} : 1)",
+                )
+
+            painter.end()
+
+        print(f"[INFO] Qt PDF fallback wrote {out_pdf_path}")
+
+    if TECHDRAW_AVAILABLE:
+        _techdraw_pdf()
+    else:
+        try:
+            _qt_pdf_fallback()
+        except Exception as exc:  # pragma: no cover - depends on runtime env
+            print(f"[WARN] TechDraw unavailable and PDF fallback failed: {exc}")
 
 
 # -----------------------------
@@ -919,6 +1029,7 @@ def main(argv: List[str] | None = None) -> int:
         title=args.title,
         out_pdf_path=pdf_path,
         with_titleblock=(not args.no_titleblock),
+        scale_hint=args.scale,
     )
 
     doc.saveAs(os.path.join(args.outdir, "freecad_source.FCStd"))

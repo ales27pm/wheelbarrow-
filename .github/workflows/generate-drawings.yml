@@ -36,7 +36,8 @@ jobs:
           export FREECAD_USER_HOME="${GITHUB_WORKSPACE}/wheelbarrow_build/freecad_user"
           mkdir -p "${FREECAD_USER_HOME}"
           "${FREECADCMD_PATH}" \
-            --run "${GITHUB_WORKSPACE}/generate_wheelbarrow_drawings.py" \
+            "${GITHUB_WORKSPACE}/generate_wheelbarrow_drawings.py" \
+            -- \
             --out "${DRAWING_OUTPUT_DIR}" \
             --paper Tabloid \
             --scale 1.0 \
