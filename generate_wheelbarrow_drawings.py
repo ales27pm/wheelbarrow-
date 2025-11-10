@@ -1272,8 +1272,22 @@ def scaled_params(scale: float) -> Dict[str, float]:
 # -----------------------------
 # Main
 # -----------------------------
+def _strip_freecad_sentinel(argv: Sequence[str]) -> List[str]:
+    """Remove the leading ``--`` emitted by ``freecadcmd`` when passing script args."""
+
+    cleaned: List[str] = []
+    sentinel_removed = False
+    for token in argv:
+        if token == "--" and not sentinel_removed:
+            sentinel_removed = True
+            continue
+        cleaned.append(token)
+    return cleaned
+
+
 def main(argv: List[str] | None = None) -> int:
-    args = parse_args(argv or sys.argv[1:])
+    raw_args = list(argv if argv is not None else sys.argv[1:])
+    args = parse_args(_strip_freecad_sentinel(raw_args))
 
     if args.scale <= 0:
         raise ValueError("Scale must be positive.")
